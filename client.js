@@ -139,15 +139,27 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 主按钮的番茄配色，交给宿主主题服务托管：每个名字给一对明暗值，
+     * 插件自己的配色，交给宿主主题服务托管：每个名字给一对明暗值，
      * 切主题时宿主自己换，插件里不需要判断当前是明是暗。
      * 名字带 dsp-pc- 前缀，不会和宿主 token 撞车。
      */
-    const TOMATO_PALETTE = {
+    const PALETTE = {
       '--dsp-pc-btn-bg': { light: '#fbdcd3', dark: '#4a1d12' },
       '--dsp-pc-btn-bg-hover': { light: '#f7cabc', dark: '#5e2517' },
       '--dsp-pc-btn-ink': { light: '#a0301c', dark: '#ffc9bb' },
       '--dsp-pc-btn-edge': { light: '#e8604a', dark: '#a8442c' },
+      // 圆盘外环按阶段换色，三种色相刻意拉开距离（番茄 8.4° / 绿 148.1° /
+      // 靛蓝 228.1°，两两间隔 ≥80°），这样 62px 的细环上一眼能分。
+      // 没选琥珀是因为它在色相环上和番茄只差 28.5°，恰恰是最难分开的一个；
+      // 也没选深绿，它和短休息绿只差 17°，比琥珀还近。
+      '--dsp-pc-ring-focus': { light: '#e8604a', dark: '#f0705a' },
+      '--dsp-pc-ring-short': { light: '#2f9e63', dark: '#4cc38a' },
+      '--dsp-pc-ring-long': { light: '#4a63c8', dark: '#8b9df0' },
+      // 未走过的那一段用同色低透明度版本。这里写死数值而不是用 color-mix()
+      // 现算：后者一旦不被支持，整条 conic-gradient 失效，圆环会直接消失。
+      '--dsp-pc-ring-focus-soft': { light: 'rgba(232, 96, 74, 0.22)', dark: 'rgba(240, 112, 90, 0.26)' },
+      '--dsp-pc-ring-short-soft': { light: 'rgba(47, 158, 99, 0.22)', dark: 'rgba(76, 195, 138, 0.26)' },
+      '--dsp-pc-ring-long-soft': { light: 'rgba(74, 99, 200, 0.22)', dark: 'rgba(139, 157, 240, 0.26)' },
     }
 
     /**
@@ -156,8 +168,13 @@ window.__ModuleLoader__.load({
      * 颜色全部走宿主主题 token；阶段强调色只用在圆环上。
      */
     const CSS = [
-      // 番茄色：与左上角图标的果实同色，圆盘的进度弧也用它。
-      `.${CLASS.root}{box-sizing:border-box;--dsp-pc-accent:#e8604a}`,
+      // 圆环按阶段换色。这里只做「阶段 → token」的映射，具体色值由主题服务
+      // 托管（见 PALETTE）；兜底色写在消费点，主题服务缺席时回退到番茄色，
+      // 而不是让整个环消失。
+      `.${CLASS.root}{box-sizing:border-box;--dsp-pc-ring:var(--dsp-pc-ring-focus);--dsp-pc-ring-soft:var(--dsp-pc-ring-focus-soft)}`,
+      `.${CLASS.root}[data-phase="focus"]{--dsp-pc-ring:var(--dsp-pc-ring-focus);--dsp-pc-ring-soft:var(--dsp-pc-ring-focus-soft)}`,
+      `.${CLASS.root}[data-phase="short"]{--dsp-pc-ring:var(--dsp-pc-ring-short);--dsp-pc-ring-soft:var(--dsp-pc-ring-short-soft)}`,
+      `.${CLASS.root}[data-phase="long"]{--dsp-pc-ring:var(--dsp-pc-ring-long);--dsp-pc-ring-soft:var(--dsp-pc-ring-long-soft)}`,
       // 共享的浮起面板外观：沿用宿主弹层的表面与投影，并给出 token 兜底。
       `.${CLASS.card},.${CLASS.mini}{position:absolute;border:1px solid var(--dsw-alias-border-l1);`,
       `background:var(--dsw-specific-menu,var(--dsw-alias-bg-overlay));`,
@@ -224,10 +241,10 @@ window.__ModuleLoader__.load({
       `.${CLASS.btn} svg{display:block}`,
       // ---- 圆盘态 ----
       `.${CLASS.mini}{width:62px;height:62px;padding:0;border-radius:50%;cursor:grab;touch-action:none}`,
-      // 圆盘外环：已走过的一段是实心番茄色，未走过的一段是同一色调的低透明度版本，
-      // 所以整个环读起来都是番茄色，不会出现一道接近黑色的边。
+      // 圆盘外环：已走过的一段是实心阶段色，未走过的一段是同色低透明度版本。
+      // 两段都跟着 data-phase 走，任何一段写死颜色都会让阶段区分失效。
       `.${CLASS.ring}{position:absolute;inset:0;border-radius:50%;display:grid;place-items:center;`,
-      `background:conic-gradient(var(--dsp-pc-accent) var(--dsp-pc-progress,0%),rgba(232,96,74,.22) 0)}`,
+      `background:conic-gradient(var(--dsp-pc-ring,#e8604a) var(--dsp-pc-progress,0%),var(--dsp-pc-ring-soft,rgba(232,96,74,.22)) 0)}`,
       `.${CLASS.ringInner}{width:50px;height:50px;border-radius:50%;display:grid;place-items:center;`,
       `background:var(--dsw-specific-menu,var(--dsw-alias-bg-overlay));color:var(--dsw-alias-label-primary);`,
       `font-size:12px;font-weight:600;line-height:1;font-variant-numeric:tabular-nums}`,
@@ -1180,7 +1197,7 @@ window.__ModuleLoader__.load({
       // 注册成功后，主按钮的番茄色会随明暗主题自动切换。
       const theme = ctx.get('theme')
       if (theme !== undefined) {
-        ctx.effect(() => theme.overrideTokens(PLUGIN_ID, TOMATO_PALETTE), 'pomodoro palette')
+        ctx.effect(() => theme.overrideTokens(PLUGIN_ID, PALETTE), 'pomodoro palette')
       }
 
       ctx.effect(() => {
