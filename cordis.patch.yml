@@ -1,0 +1,9 @@
+# Floating Pomodoro clock over the shipped Web composition, which carries no
+# such row. The Host half is intentionally empty: the whole clock lives in the
+# browser entry, which mounts itself into the frame-wide `shell.overlay` layer.
+# The row exists so the plugin is addressable, listed, and toggleable in the
+# profile like any other bundle.
+
+- insert:
+    - id: pomodoro-clock
+      name: '@local/pomodoro-clock'

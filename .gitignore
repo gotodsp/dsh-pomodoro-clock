@@ -1,0 +1,12 @@
+# 依赖目录（本插件不需要依赖，保留以防以后引入构建工具）
+node_modules/
+
+# 编辑器与系统文件
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# 日志与临时文件
+*.log
+*.tmp
