@@ -56,6 +56,7 @@ window.__ModuleLoader__.load({
       'phase.long': 'Long break',
       'action.start': 'Start focus',
       'action.pause': 'Pause',
+      'action.startBreak': 'Start break',
       'action.reset': 'Restart this phase',
       'action.skip': 'Skip to the next phase',
       'action.settings': 'Pomodoro clock settings',
@@ -86,6 +87,7 @@ window.__ModuleLoader__.load({
       'phase.long': '长休息',
       'action.start': '开始专注',
       'action.pause': '暂停',
+      'action.startBreak': '开始休息',
       'action.reset': '重开本阶段',
       'action.skip': '跳到下一阶段',
       'action.settings': '番茄时钟设置',
@@ -541,14 +543,22 @@ window.__ModuleLoader__.load({
         skip() {
           mutate(() => completePhase({ count: false, chime: false }, Date.now()))
         },
-        /** 胶囊标签切换阶段：重置为完整时长，但保留"正在计时"这个状态。 */
+        /**
+         * 胶囊标签切换阶段：切过去、重置为完整时长、**一律停住**。
+         *
+         * 不保留"正在计时"。点标签是导航而不是提交，让它切换后继续跑等于
+         * 在这条没有"阶段结束"事件的路径上自动开始了一个阶段：既和
+         * autoStartBreak / autoStartFocus 的语义冲突（关掉自动开始却在
+         * 这里被绕过），误触时也会静默开始一段你并没要过的休息。
+         * 要真正开始，按「开始」。
+         */
         switchPhase(phase) {
           if (!PHASES.includes(phase) || phase === state.phase) return
           mutate(() => {
-            const now = Date.now()
             state.phase = phase
             state.remainingMs = phaseDuration(state.settings, phase)
-            state.endsAt = state.running ? now + state.remainingMs : 0
+            state.running = false
+            state.endsAt = 0
           })
         },
         updateSettings(patch) {
@@ -965,7 +975,11 @@ window.__ModuleLoader__.load({
       const style = floating
         ? { left: `${ui.pos.x}px`, top: `${ui.pos.y}px`, right: 'auto', bottom: 'auto' }
         : undefined
-      const toggleLabel = snap.running ? t('action.pause') : t('action.start')
+      // 切换阶段后一律停在暂停态，所以按钮文案必须跟着阶段走 ——
+      // 否则在短休息/长休息阶段会显示成「开始专注」。
+      const toggleLabel = snap.running
+        ? t('action.pause')
+        : snap.phase === 'focus' ? t('action.start') : t('action.startBreak')
 
       if (ui.collapsed) {
         return h('div', {
@@ -1041,15 +1055,15 @@ window.__ModuleLoader__.load({
         'aria-selected': snap.phase === phase,
         tabIndex: snap.phase === phase ? 0 : -1,
         onClick: () => pomodoro.switchPhase(phase),
+        // 方向键只移动焦点，不提交 —— 在 tablist 里浏览不等于选择。
+        // 提交走 Enter / 空格（button 原生就会触发 onClick），即"手动激活"。
         onKeyDown: (event) => {
           const delta = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0
           if (delta === 0) return
           event.preventDefault()
-          const next = PHASES[(index + delta + PHASES.length) % PHASES.length]
-          pomodoro.switchPhase(next)
           const strip = event.currentTarget.parentElement
-          const buttons = strip === null ? [] : [...strip.querySelectorAll('[role="tab"]')]
-          const target = buttons[(index + delta + PHASES.length) % PHASES.length]
+          const tabs = strip === null ? [] : [...strip.querySelectorAll('[role="tab"]')]
+          const target = tabs[(index + delta + tabs.length) % tabs.length]
           if (target !== undefined) target.focus()
         },
       }, phaseLabel(phase)))),
