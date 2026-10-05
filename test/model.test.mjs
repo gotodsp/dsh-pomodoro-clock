@@ -190,7 +190,27 @@ group('跳过遵循长休息周期')
   const m = fresh()
   for (let i = 0; i < 7; i += 1) m.skip()
   check(m.getSnapshot().completedFocus === 0, '跳过不虚报番茄数（completedFocus 仍为 0）', String(m.getSnapshot().completedFocus))
-  check(m.getSnapshot().cycleFocus === 0, '长休息后周期位置归零', String(m.getSnapshot().cycleFocus))
+  // 7 次跳过之后正处在长休息**当中**（不是"之后"——旧断言的名称一直是错的，
+  // 它只是因为旧代码在进入长休息的瞬间就清零才凑巧通过）。
+  // 停在 longEvery 上正是修复的目的：让「本轮 4/4」渲染得出来。
+  check(m.getSnapshot().phase === 'long' && m.getSnapshot().cycleFocus === 4,
+    '长休息期间本轮计数停在 4（4/4 可见，不再提前归零）',
+    `${zh(m.getSnapshot().phase)} / ${m.getSnapshot().cycleFocus}`)
+  m.skip()
+  check(m.getSnapshot().phase === 'focus' && m.getSnapshot().cycleFocus === 0,
+    '长休息走完、进入下一轮专注时才归零',
+    `${zh(m.getSnapshot().phase)} / ${m.getSnapshot().cycleFocus}`)
+}
+{
+  // 长休息中途点 Tab 切到专注走的是 switchPhase，不经过 completePhase ——
+  // 少了那里的归一化，cycleFocus 会卡在 longEvery 上，之后每次专注结束都会
+  // 再判出一个长休息。
+  const m = fresh()
+  for (let i = 0; i < 7; i += 1) m.skip()
+  m.switchPhase('focus')
+  check(m.getSnapshot().cycleFocus === 0, '长休息中途切到专注也归零（Tab 绕过 completePhase 的那条路）', String(m.getSnapshot().cycleFocus))
+  m.skip()
+  check(m.getSnapshot().phase === 'short', '切走之后下一个专注结束进的是短休息，不是又一个长休息', zh(m.getSnapshot().phase))
 }
 {
   const m = fresh()

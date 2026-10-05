@@ -550,8 +550,15 @@ window.__ModuleLoader__.load({
           state.cycleFocus += 1
         }
         const long = fromFocus && state.cycleFocus >= state.settings.longEvery
-        if (long) state.cycleFocus = 0
+        // 这里**不**清零。第四个专注结束时 cycleFocus 恰好等于 longEvery，那一刻
+        // 「本轮已完成 4 个」就是事实 —— 在进入长休息的瞬间清零，会让 4/4 只存在
+        // 零毫秒、任何一次渲染都观察不到，于是 `本轮 X/4` 的分子永远够不到分母，
+        // 读起来像"永远完不成一轮"。清零挪到「下一个专注开始」时做，见下方归一化。
         const following = fromFocus ? (long ? 'long' : 'short') : 'focus'
+        // 进入专注 = 新一轮开始，把上一轮遗留的满计数收掉。
+        // 必须放在这里而不是"长休息走完时"：用户可以在长休息中途点 Tab 直接切到
+        // 专注，那条路走 switchPhase，根本不经过 completePhase。
+        if (following === 'focus' && state.cycleFocus >= state.settings.longEvery) state.cycleFocus = 0
         const autoStart = options.force === true
           ? true
           : options.count === true
@@ -673,6 +680,10 @@ window.__ModuleLoader__.load({
             const duration = phaseDuration(state.settings, phase)
             const remembered = state.stash[phase]
             state.phase = phase
+            // 与 completePhase 里同样的归一化：切进专注也意味着新一轮开始。
+            // 少了这一句，用户在长休息中途切到专注时 cycleFocus 会一直卡在
+            // longEvery 上，之后每次专注结束都会再判出一个长休息。
+            if (phase === 'focus' && state.cycleFocus >= state.settings.longEvery) state.cycleFocus = 0
             state.remainingMs = typeof remembered === 'number' && remembered > 0
               ? Math.min(remembered, duration)
               : duration
