@@ -11,12 +11,14 @@
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json",
     "./locale/*.json": "./locale/*.json"
   },
   "files": [
     "index.js",
     "client.js",
+    "cordis.patch.yml",
     "icon.svg",
     "locale/*.json",
     "test/*.mjs"
