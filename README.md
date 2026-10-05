@@ -30,6 +30,8 @@ Harness Web UI 的**悬浮**专注计时器。挂载在全窗口浮层 `shell.ov
 
 盘面上时针分针固定指向 **15:00**：时针朝右（3 点方向，90°），分针朝上（12 点方向，0°），两针成 90°。
 
+![](img/pomodoro-normal-start.png)
+
 ![](img/pomodoro-normal.png)
 
 
