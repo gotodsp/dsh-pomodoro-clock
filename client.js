@@ -238,13 +238,13 @@ window.__ModuleLoader__.load({
     const clamp = (value, min, max) => Math.min(max, Math.max(min, value))
     const clampInt = (value, min, max) => clamp(Math.round(value), min, max)
 
+    /** 某个阶段配置的分钟数。 */
+    const phaseMinutes = (settings, phase) => phase === 'focus'
+      ? settings.focusMinutes
+      : phase === 'short' ? settings.shortMinutes : settings.longMinutes
+
     /** 某个阶段的完整时长（毫秒）。 */
-    const phaseDuration = (settings, phase) => {
-      const minutes = phase === 'focus'
-        ? settings.focusMinutes
-        : phase === 'short' ? settings.shortMinutes : settings.longMinutes
-      return minutes * 60000
-    }
+    const phaseDuration = (settings, phase) => phaseMinutes(settings, phase) * 60000
 
     /** `mm:ss`，向上取整，让刚进入的阶段显示完整时长。 */
     const formatClock = (seconds) => {
@@ -365,6 +365,10 @@ window.__ModuleLoader__.load({
         completedFocus: 0,
         cycleFocus: 0,
         settings: { ...DEFAULT_SETTINGS },
+        // 各阶段被切走时留下的"续跑点"，切回去可以接着走而不是从零开始。
+        // 只有 switchPhase 会写入，且只记真正走过一部分的阶段；阶段自然走完、
+        // 重开本阶段、清除统计时都会被清掉，避免旧进度在下次进入时冒出来。
+        stash: {},
       }
 
       const stored = readJson(STORAGE_KEY)
@@ -373,6 +377,15 @@ window.__ModuleLoader__.load({
         if (PHASES.includes(stored.phase)) state.phase = stored.phase
         if (Number.isFinite(stored.completedFocus) && stored.completedFocus >= 0) state.completedFocus = Math.floor(stored.completedFocus)
         if (Number.isFinite(stored.cycleFocus) && stored.cycleFocus >= 0) state.cycleFocus = Math.floor(stored.cycleFocus)
+        if (stored.stash !== null && typeof stored.stash === 'object') {
+          for (const phase of PHASES) {
+            const value = stored.stash[phase]
+            // 只有大于 0 的才是有效续跑点；超过当前时长的夹回去，改过设置也不会越界。
+            if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+              state.stash[phase] = Math.min(value, phaseDuration(state.settings, phase))
+            }
+          }
+        }
         const duration = phaseDuration(state.settings, state.phase)
         if (stored.running === true && Number.isFinite(stored.endsAt)) {
           // 存的是截止时刻而不是剩余量，所以刷新后能直接对上真实时间。
@@ -393,6 +406,7 @@ window.__ModuleLoader__.load({
           completedFocus: state.completedFocus,
           cycleFocus: state.cycleFocus,
           settings: state.settings,
+          stash: state.stash,
         })
       }
 
@@ -436,12 +450,13 @@ window.__ModuleLoader__.load({
         }
       }
 
-      /** 停下计时，并把当前阶段恢复到完整时长。 */
+      /** 停下计时，把当前阶段恢复到完整时长；该阶段的续跑点同时作废。 */
       function enterFresh(phase) {
         state.phase = phase
         state.remainingMs = phaseDuration(state.settings, phase)
         state.running = false
         state.endsAt = 0
+        delete state.stash[phase]
       }
 
       /**
@@ -452,7 +467,8 @@ window.__ModuleLoader__.load({
        * `force` 表示无视"自动开始"设置继续串下去，只有补算时才用。
        */
       function completePhase(options, at) {
-        const fromFocus = state.phase === 'focus'
+        const finishing = state.phase
+        const fromFocus = finishing === 'focus'
         if (fromFocus && options.count === true) {
           state.completedFocus += 1
           state.cycleFocus += 1
@@ -464,6 +480,10 @@ window.__ModuleLoader__.load({
           ? true
           : options.count === true
             && (following === 'focus' ? state.settings.autoStartFocus : state.settings.autoStartBreak)
+        // 走完的阶段不该再留续跑点，新进入的阶段也必须从完整时长开始 ——
+        // 否则上一轮切走时存下的"还剩 3 分钟"会在这次进来时冒出来。
+        delete state.stash[finishing]
+        delete state.stash[following]
         state.phase = following
         state.remainingMs = phaseDuration(state.settings, following)
         if (autoStart) {
@@ -527,7 +547,10 @@ window.__ModuleLoader__.load({
               state.running = false
               state.endsAt = 0
             } else {
-              if (state.remainingMs <= 0) state.remainingMs = phaseDuration(state.settings, state.phase)
+              if (state.remainingMs <= 0) {
+                state.remainingMs = phaseDuration(state.settings, state.phase)
+                delete state.stash[state.phase]
+              }
               state.running = true
               state.endsAt = now + state.remainingMs
             }
@@ -538,25 +561,45 @@ window.__ModuleLoader__.load({
             const now = Date.now()
             state.remainingMs = phaseDuration(state.settings, state.phase)
             state.endsAt = state.running ? now + state.remainingMs : 0
+            // 重开就是从零开始，这个阶段的旧续跑点没有意义了。
+            delete state.stash[state.phase]
           })
         },
         skip() {
           mutate(() => completePhase({ count: false, chime: false }, Date.now()))
         },
         /**
-         * 胶囊标签切换阶段：切过去、重置为完整时长、**一律停住**。
+         * 胶囊标签切换阶段：切过去、**一律停住**，要真正开始得按「开始」。
          *
-         * 不保留"正在计时"。点标签是导航而不是提交，让它切换后继续跑等于
+         * 不保留"正在计时"—— 点标签是导航，不是提交。让它切换后继续跑，等于
          * 在这条没有"阶段结束"事件的路径上自动开始了一个阶段：既和
          * autoStartBreak / autoStartFocus 的语义冲突（关掉自动开始却在
          * 这里被绕过），误触时也会静默开始一段你并没要过的休息。
-         * 要真正开始，按「开始」。
+         *
+         * 但切换**不再销毁进度**：离开时把当前阶段已走剩下的部分记进 stash，
+         * 切回来就续上（仍是暂停态）。这样"为了看一眼短休息几分钟"点一下
+         * 再点回来，不会白白丢掉已经专注的时间。
          */
         switchPhase(phase) {
           if (!PHASES.includes(phase) || phase === state.phase) return
           mutate(() => {
+            const leaving = state.phase
+            const leftover = state.running
+              ? Math.max(0, state.endsAt - Date.now())
+              : state.remainingMs
+            // 只有"走过一部分、又没走完"的阶段才值得留续跑点：
+            // 完整未动的阶段切回来本来就该是完整时长，不必存。
+            if (leftover > 0 && leftover < phaseDuration(state.settings, leaving)) {
+              state.stash[leaving] = leftover
+            } else {
+              delete state.stash[leaving]
+            }
+            const duration = phaseDuration(state.settings, phase)
+            const remembered = state.stash[phase]
             state.phase = phase
-            state.remainingMs = phaseDuration(state.settings, phase)
+            state.remainingMs = typeof remembered === 'number' && remembered > 0
+              ? Math.min(remembered, duration)
+              : duration
             state.running = false
             state.endsAt = 0
           })
@@ -583,6 +626,7 @@ window.__ModuleLoader__.load({
             state.settings = { ...DEFAULT_SETTINGS }
             state.completedFocus = 0
             state.cycleFocus = 0
+            state.stash = {}
             enterFresh('focus')
           })
         },
@@ -1054,6 +1098,9 @@ window.__ModuleLoader__.load({
         className: CLASS.tab,
         'aria-selected': snap.phase === phase,
         tabIndex: snap.phase === phase ? 0 : -1,
+        // 悬停就能看到这个阶段有多长，省得"为了看一眼时长"而点一下、
+        // 平白切走当前正在跑的阶段。
+        title: `${phaseLabel(phase)} · ${phaseMinutes(snap.settings, phase)} ${t('settings.minutes')}`,
         onClick: () => pomodoro.switchPhase(phase),
         // 方向键只移动焦点，不提交 —— 在 tablist 里浏览不等于选择。
         // 提交走 Enter / 空格（button 原生就会触发 onClick），即"手动激活"。
