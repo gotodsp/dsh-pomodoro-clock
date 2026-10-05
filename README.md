@@ -48,7 +48,11 @@ Harness Web UI 的**悬浮**专注计时器。挂载在全窗口浮层 `shell.ov
 
 **圆盘态**（点 `—` 收起）：62px 圆盘，外环是本阶段进度，中心是倒计时。点一下展开，拖一下移动。
 
-![](img/pomodoro-circle.png)
+![](img/pomodoro-circle-work.png)
+
+![](img/pomodoro-circle-rest-short.png)
+
+![](img/pomodoro-circle-rest-long.png)
 
 ![](img/pomodoro-circle-overall.png)
 
