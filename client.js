@@ -139,8 +139,17 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 插件自己的配色，交给宿主主题服务托管：每个名字给一对明暗值，
-     * 切主题时宿主自己换，插件里不需要判断当前是明是暗。
+     * 插件自己的配色。每个名字给一对明暗值。
+     *
+     * **不走 `ctx.theme.overrideTokens()`，而是由下面的 `paletteDecls()` 直接生
+     * 成两条 CSS 规则写进本插件自己的 `<style>`。** 这不是偏好，是踩坑后的结论：
+     * 覆盖层能注册成功（`Theme.listTokens` 里 16 个 token 一个不少），但值**从来
+     * 没落到 DOM 上** —— 实测 `getComputedStyle(document.body).getPropertyValue
+     * ('--dsp-pc-ring-short')` 返回空串，于是三个阶段全部回退到兜底色。
+     * 色值放进自己注入的样式表后，就和消费它们的规则**原子同在**：样式表在，
+     * 颜色就在；样式表不在，整个部件都是裸的。两者再不可能脱节。
+     * 代价：这些 token 不再出现在 `Theme.listTokens` 里。
+     *
      * 名字带 dsp-pc- 前缀，不会和宿主 token 撞车。
      */
     const PALETTE = {
@@ -180,11 +189,23 @@ window.__ModuleLoader__.load({
      * 仅给直接子元素放行指针事件 —— 所以这个部件只能是自身盒子大小。
      * 颜色全部走宿主主题 token；阶段强调色只用在圆环上。
      */
+    /**
+     * 把 PALETTE 摊成 CSS 声明串。明暗两套都从这里生成，避免手抄两遍出错。
+     */
+    const paletteDecls = (mode) =>
+      Object.entries(PALETTE).map(([name, pair]) => `${name}:${pair[mode]}`).join(';')
+
     const CSS = [
-      // 圆环按阶段换色。这里只做「阶段 → token」的映射，具体色值由主题服务
-      // 托管（见 PALETTE）；兜底色写在消费点，主题服务缺席时回退到番茄色，
-      // 而不是让整个环消失。
-      `.${CLASS.root}{box-sizing:border-box;--dsp-pc-ring:var(--dsp-pc-ring-focus);--dsp-pc-ring-soft:var(--dsp-pc-ring-focus-soft);--dsp-pc-dial:var(--dsp-pc-dial-focus);--dsp-pc-dial-rest:var(--dsp-pc-dial-focus-rest)}`,
+      // 圆盘按阶段换色：这一条只做「阶段 → token」的映射，具体色值由下面的
+      // 浅色/深色两条规则提供。映射和色值分开写，是为了让深色规则只覆盖原始
+      // 色值、不去碰映射变量（原因见深色那条的注释）。
+      `.${CLASS.root}{box-sizing:border-box;${paletteDecls('light')};--dsp-pc-ring:var(--dsp-pc-ring-focus);--dsp-pc-ring-soft:var(--dsp-pc-ring-focus-soft);--dsp-pc-dial:var(--dsp-pc-dial-focus);--dsp-pc-dial-rest:var(--dsp-pc-dial-focus-rest)}`,
+      // 深色：**只覆盖原始色值，绝不重新声明 --dsp-pc-ring / --dsp-pc-dial**。
+      // 这条选择器是 (0,2,1)，而阶段规则 `.dsp-pc-root[data-phase=…]` 是 (0,2,0)
+      // —— 一旦在这里也写映射变量，深色下阶段就会被永久钉死在 focus。
+      // `body[data-ds-dark-theme]` 是宿主 layout presenter 维护的暗色属性，
+      // 宿主自己的主题 CSS 用的也是它。
+      `body[data-ds-dark-theme] .${CLASS.root}{${paletteDecls('dark')}}`,
       `.${CLASS.root}[data-phase="focus"]{--dsp-pc-ring:var(--dsp-pc-ring-focus);--dsp-pc-ring-soft:var(--dsp-pc-ring-focus-soft);--dsp-pc-dial:var(--dsp-pc-dial-focus);--dsp-pc-dial-rest:var(--dsp-pc-dial-focus-rest)}`,
       `.${CLASS.root}[data-phase="short"]{--dsp-pc-ring:var(--dsp-pc-ring-short);--dsp-pc-ring-soft:var(--dsp-pc-ring-short-soft);--dsp-pc-dial:var(--dsp-pc-dial-short);--dsp-pc-dial-rest:var(--dsp-pc-dial-short-rest)}`,
       `.${CLASS.root}[data-phase="long"]{--dsp-pc-ring:var(--dsp-pc-ring-long);--dsp-pc-ring-soft:var(--dsp-pc-ring-long-soft);--dsp-pc-dial:var(--dsp-pc-dial-long);--dsp-pc-dial-rest:var(--dsp-pc-dial-long-rest)}`,
@@ -1220,12 +1241,10 @@ window.__ModuleLoader__.load({
       ctx.effect(() => registerDictionary(ctx, 'en', EN), 'pomodoro locale en')
       const t = ctx.locale.bind(NS)
 
-      // 主题服务走可选依赖：拿不到就退回 CSS 里写死的浅色值，不影响插件激活。
-      // 注册成功后，主按钮的番茄色会随明暗主题自动切换。
-      const theme = ctx.get('theme')
-      if (theme !== undefined) {
-        ctx.effect(() => theme.overrideTokens(PLUGIN_ID, PALETTE), 'pomodoro palette')
-      }
+      // 这里原先调用 ctx.theme.overrideTokens() 注册调色板，现已移除：
+      // 覆盖层注册得成功，值却到不了 DOM，导致阶段色全部失效。配色改由 PALETTE
+      // 直接生成 CSS 规则写进本插件自己的样式表（见 paletteDecls），与消费点
+      // 原子同在。详见 PALETTE 上方与 README 的说明。
 
       ctx.effect(() => {
         model.refresh()
