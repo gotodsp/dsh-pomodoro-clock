@@ -256,14 +256,23 @@ window.__ModuleLoader__.load({
       `.${CLASS.mini}{width:62px;height:62px;padding:0;border-radius:50%;cursor:grab;touch-action:none}`,
       // 圆盘外环：已走过的一段是实心阶段色，未走过的一段是同色低透明度版本。
       // 两段都跟着 data-phase 走，任何一段写死颜色都会让阶段区分失效。
+      //
+      // 兜底值刻意用**错误色**而不是番茄色。早先这里是 #e8604a，于是当主题调色板
+      // 整个丢失时（实测：页面处于半更新状态，覆盖层被移除却没重新注册），三个
+      // 阶段全部回退成番茄色 —— 一个"看起来完全合理"的错误画面，害我在读 CSS 和
+      // 主题实现上绕了好几轮。现在这种故障渲染成红环：还在显示说明部件活着，
+      // 是红的说明这是错误态，一眼可辨。两段共用同一个兜底色，顺带让进度也失效，
+      // 与任何正常状态都不同。
       `.${CLASS.ring}{position:absolute;inset:0;border-radius:50%;display:grid;place-items:center;`,
-      `background:conic-gradient(var(--dsp-pc-ring,#e8604a) var(--dsp-pc-progress,0%),var(--dsp-pc-ring-soft,rgba(232,96,74,.22)) 0)}`,
+      `background:conic-gradient(var(--dsp-pc-ring,var(--dsw-alias-state-error-primary)) var(--dsp-pc-progress,0%),var(--dsp-pc-ring-soft,var(--dsw-alias-state-error-primary)) 0)}`,
       // 圆盘中间：自己的 conic-gradient，两层都是**不透明实色**。
       // 早先这里借用了宿主的 --dsw-specific-menu 当遮罩，那是磨砂面板填充、
       // 透明度随平台变，于是底下的扇形会透上来 —— 换成实色 token 后，
       // 中间在任何平台都是同一份颜色。
+      // 兜底同样不用阶段色，改用不透明的中性面板色：故障由红环负责报警，
+      // 中间保持中性，倒计时文字仍然可读。
       `.${CLASS.ringInner}{width:50px;height:50px;border-radius:50%;display:grid;place-items:center;`,
-      `background:conic-gradient(var(--dsp-pc-dial,#f8cfc9) var(--dsp-pc-progress,0%),var(--dsp-pc-dial-rest,#fdefed) 0);`,
+      `background:conic-gradient(var(--dsp-pc-dial,var(--dsw-alias-bg-overlay)) var(--dsp-pc-progress,0%),var(--dsp-pc-dial-rest,var(--dsw-alias-bg-overlay)) 0);`,
       `color:var(--dsw-alias-label-primary);`,
       `font-size:12px;font-weight:600;line-height:1;font-variant-numeric:tabular-nums}`,
     ].join('')
