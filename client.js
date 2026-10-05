@@ -160,6 +160,19 @@ window.__ModuleLoader__.load({
       '--dsp-pc-ring-focus-soft': { light: 'rgba(232, 96, 74, 0.22)', dark: 'rgba(240, 112, 90, 0.26)' },
       '--dsp-pc-ring-short-soft': { light: 'rgba(47, 158, 99, 0.22)', dark: 'rgba(76, 195, 138, 0.26)' },
       '--dsp-pc-ring-long-soft': { light: 'rgba(74, 99, 200, 0.22)', dark: 'rgba(139, 157, 240, 0.26)' },
+      // 圆盘中间那两个深浅层次。这里**必须是不透明的实色**，不能带 alpha：
+      // 中间原本是用宿主的 --dsw-specific-menu 盖出来的，而那是「磨砂面板」填充，
+      // 透明度随平台变（实测同一 token 有 94% 和 58% 两套定义）。在 macOS 桌面上
+      // 拿到偏透的那套，底下 conic-gradient 的扇形就透了上来，变成一块「太浅、
+      // 分不出」的残影。实色 token 让两个平台完全一致。
+      // 生成规则：阶段色叠在面板底色上，浅色主题 已走过≈30% / 未走过≈10%，
+      // 深色主题 34% / 14%。两层都带色相，这样阶段刚开始时中间也不会变得没颜色。
+      '--dsp-pc-dial-focus': { light: '#f8cfc9', dark: '#714642' },
+      '--dsp-pc-dial-focus-rest': { light: '#fdefed', dark: '#4b3a3b' },
+      '--dsp-pc-dial-short': { light: '#c9e6d6', dark: '#385d4f' },
+      '--dsp-pc-dial-short-rest': { light: '#eaf5ef', dark: '#334340' },
+      '--dsp-pc-dial-long': { light: '#d0d6f1', dark: '#4b516e' },
+      '--dsp-pc-dial-long-rest': { light: '#edeffa', dark: '#3b3e4c' },
     }
 
     /**
@@ -171,10 +184,10 @@ window.__ModuleLoader__.load({
       // 圆环按阶段换色。这里只做「阶段 → token」的映射，具体色值由主题服务
       // 托管（见 PALETTE）；兜底色写在消费点，主题服务缺席时回退到番茄色，
       // 而不是让整个环消失。
-      `.${CLASS.root}{box-sizing:border-box;--dsp-pc-ring:var(--dsp-pc-ring-focus);--dsp-pc-ring-soft:var(--dsp-pc-ring-focus-soft)}`,
-      `.${CLASS.root}[data-phase="focus"]{--dsp-pc-ring:var(--dsp-pc-ring-focus);--dsp-pc-ring-soft:var(--dsp-pc-ring-focus-soft)}`,
-      `.${CLASS.root}[data-phase="short"]{--dsp-pc-ring:var(--dsp-pc-ring-short);--dsp-pc-ring-soft:var(--dsp-pc-ring-short-soft)}`,
-      `.${CLASS.root}[data-phase="long"]{--dsp-pc-ring:var(--dsp-pc-ring-long);--dsp-pc-ring-soft:var(--dsp-pc-ring-long-soft)}`,
+      `.${CLASS.root}{box-sizing:border-box;--dsp-pc-ring:var(--dsp-pc-ring-focus);--dsp-pc-ring-soft:var(--dsp-pc-ring-focus-soft);--dsp-pc-dial:var(--dsp-pc-dial-focus);--dsp-pc-dial-rest:var(--dsp-pc-dial-focus-rest)}`,
+      `.${CLASS.root}[data-phase="focus"]{--dsp-pc-ring:var(--dsp-pc-ring-focus);--dsp-pc-ring-soft:var(--dsp-pc-ring-focus-soft);--dsp-pc-dial:var(--dsp-pc-dial-focus);--dsp-pc-dial-rest:var(--dsp-pc-dial-focus-rest)}`,
+      `.${CLASS.root}[data-phase="short"]{--dsp-pc-ring:var(--dsp-pc-ring-short);--dsp-pc-ring-soft:var(--dsp-pc-ring-short-soft);--dsp-pc-dial:var(--dsp-pc-dial-short);--dsp-pc-dial-rest:var(--dsp-pc-dial-short-rest)}`,
+      `.${CLASS.root}[data-phase="long"]{--dsp-pc-ring:var(--dsp-pc-ring-long);--dsp-pc-ring-soft:var(--dsp-pc-ring-long-soft);--dsp-pc-dial:var(--dsp-pc-dial-long);--dsp-pc-dial-rest:var(--dsp-pc-dial-long-rest)}`,
       // 共享的浮起面板外观：沿用宿主弹层的表面与投影，并给出 token 兜底。
       `.${CLASS.card},.${CLASS.mini}{position:absolute;border:1px solid var(--dsw-alias-border-l1);`,
       `background:var(--dsw-specific-menu,var(--dsw-alias-bg-overlay));`,
@@ -245,8 +258,13 @@ window.__ModuleLoader__.load({
       // 两段都跟着 data-phase 走，任何一段写死颜色都会让阶段区分失效。
       `.${CLASS.ring}{position:absolute;inset:0;border-radius:50%;display:grid;place-items:center;`,
       `background:conic-gradient(var(--dsp-pc-ring,#e8604a) var(--dsp-pc-progress,0%),var(--dsp-pc-ring-soft,rgba(232,96,74,.22)) 0)}`,
+      // 圆盘中间：自己的 conic-gradient，两层都是**不透明实色**。
+      // 早先这里借用了宿主的 --dsw-specific-menu 当遮罩，那是磨砂面板填充、
+      // 透明度随平台变，于是底下的扇形会透上来 —— 换成实色 token 后，
+      // 中间在任何平台都是同一份颜色。
       `.${CLASS.ringInner}{width:50px;height:50px;border-radius:50%;display:grid;place-items:center;`,
-      `background:var(--dsw-specific-menu,var(--dsw-alias-bg-overlay));color:var(--dsw-alias-label-primary);`,
+      `background:conic-gradient(var(--dsp-pc-dial,#f8cfc9) var(--dsp-pc-progress,0%),var(--dsp-pc-dial-rest,#fdefed) 0);`,
+      `color:var(--dsw-alias-label-primary);`,
       `font-size:12px;font-weight:600;line-height:1;font-variant-numeric:tabular-nums}`,
     ].join('')
 
