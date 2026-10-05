@@ -5,6 +5,9 @@
   "description": "Floating Pomodoro focus clock: 25/5/15 phases, draggable dial, cycle counter, and settings.",
   "type": "module",
   "icon": "./icon.svg",
+  "scripts": {
+    "test": "node test/model.test.mjs"
+  },
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
@@ -15,7 +18,8 @@
     "index.js",
     "client.js",
     "icon.svg",
-    "locale/*.json"
+    "locale/*.json",
+    "test/*.mjs"
   ],
   "dsh": {
     "manifestVersion": 1,

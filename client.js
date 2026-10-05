@@ -418,6 +418,11 @@ window.__ModuleLoader__.load({
         const seconds = Math.ceil(remainingMs / 1000)
         return {
           phase: state.phase,
+          // 现在结束本阶段会进入哪里 —— 由模型算，视图不要自己复刻周期规则。
+          // 专注阶段要用 cycleFocus + 1 判断，因为 completePhase 是先推进再判定。
+          nextPhase: state.phase === 'focus'
+            ? (state.cycleFocus + 1 >= state.settings.longEvery ? 'long' : 'short')
+            : 'focus',
           running: state.running,
           seconds,
           totalSeconds: Math.round(duration / 1000),
@@ -469,8 +474,14 @@ window.__ModuleLoader__.load({
       function completePhase(options, at) {
         const finishing = state.phase
         const fromFocus = finishing === 'focus'
-        if (fromFocus && options.count === true) {
-          state.completedFocus += 1
+        // 统计计数与周期位置是两件事，不能共用一个开关：
+        //   completedFocus —— "真正完成了几个人番茄"，只有自然走完才算；
+        //   cycleFocus     —— "在周期里的位置"，专注阶段无论怎么结束都往前推一格。
+        // 早期版本把两者都挂在 options.count 上，于是「跳过」和「补算」都会把
+        // 周期冻住，长休息永远不可达 —— longEvery=1 时甚至会进入一个按规则
+        // 根本不该存在的短休息。
+        if (fromFocus) {
+          if (options.count === true) state.completedFocus += 1
           state.cycleFocus += 1
         }
         const long = fromFocus && state.cycleFocus >= state.settings.longEvery
@@ -775,6 +786,16 @@ window.__ModuleLoader__.load({
 
     // ---- 视图层 hooks ----------------------------------------------------
 
+    /**
+     * 阶段名的字面量调用 —— 三个 `t()` 都写成字面量，语言包键名一目了然。
+     * 提到模块作用域是因为「跳到…」按钮在设置面板里也要用它。
+     */
+    function phaseLabelOf(t, phase) {
+      return phase === 'focus'
+        ? t('phase.focus')
+        : phase === 'short' ? t('phase.short') : t('phase.long')
+    }
+
     /** 订阅模型；快照引用只在真正变化时才换，因此不会每帧重渲染。 */
     function usePomodoro(model) {
       const [value, setValue] = React.useState(() => model.getSnapshot())
@@ -905,7 +926,7 @@ window.__ModuleLoader__.load({
             type: 'button',
             className: CLASS.btn,
             onClick: () => pomodoro.skip(),
-          }, skipIcon(), h('span', null, t('action.skip'))),
+          }, skipIcon(), h('span', null, `${t('action.skip')} · ${phaseLabelOf(t, snap.nextPhase)}`)),
           h('button', {
             type: 'button',
             className: CLASS.btn,
@@ -1010,10 +1031,7 @@ window.__ModuleLoader__.load({
       }
 
       /** 阶段名走字面量调用，语言包键名一目了然。 */
-      const phaseLabel = (phase) => phase === 'focus'
-        ? t('phase.focus')
-        : phase === 'short' ? t('phase.short') : t('phase.long')
-
+      const phaseLabel = (phase) => phaseLabelOf(t, phase)
       const percent = Math.round(snap.progress * 100)
       const floating = ui.pos !== null
       const style = floating
