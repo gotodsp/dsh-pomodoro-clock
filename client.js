@@ -1275,16 +1275,47 @@ window.__ModuleLoader__.load({
      * @param {{ onDismiss: (fromKeyboard: boolean) => void }} props
      *   onDismiss 的参数为 true 表示这次收起来自键盘激活（见 tipCloseFromKeyboard）。
      */
+    // 气泡的阶段色用**内联**方式发过去，不走 CSS 继承。
+    //
+    // 原因：气泡和时钟根节点是**兄弟**（都直接挂在整帧浮层里），兄弟之间不继承自定义属性。
+    // 早先用"给 `.dsp-pc-tip[data-phase=…]` 也写一条映射规则"来补；那条路能work，但它依赖
+    // 选择器匹配、样式表顺序与继承三者**全部**正确 —— 任何一处出问题，四个变量会同时落到
+    // 兜底值，表现是"整圈一个颜色、看不出扇形、且和圆盘颜色不一样"，而且完全静默、没有报错。
+    // 内联样式没有这些环节：写在元素上就是那个值。
+    const TIP_PHASE_VARS = {
+      focus: {
+        '--dsp-pc-ring': 'var(--dsp-pc-ring-focus)',
+        '--dsp-pc-ring-soft': 'var(--dsp-pc-ring-focus-soft)',
+        '--dsp-pc-dial': 'var(--dsp-pc-dial-focus)',
+        '--dsp-pc-dial-rest': 'var(--dsp-pc-dial-focus-rest)',
+      },
+      short: {
+        '--dsp-pc-ring': 'var(--dsp-pc-ring-short)',
+        '--dsp-pc-ring-soft': 'var(--dsp-pc-ring-short-soft)',
+        '--dsp-pc-dial': 'var(--dsp-pc-dial-short)',
+        '--dsp-pc-dial-rest': 'var(--dsp-pc-dial-short-rest)',
+      },
+      long: {
+        '--dsp-pc-ring': 'var(--dsp-pc-ring-long)',
+        '--dsp-pc-ring-soft': 'var(--dsp-pc-ring-long-soft)',
+        '--dsp-pc-dial': 'var(--dsp-pc-dial-long)',
+        '--dsp-pc-dial-rest': 'var(--dsp-pc-dial-long-rest)',
+      },
+    }
+
     function BreakTip({ snap, t, sentence, onDismiss }) {
       return h('div', {
         className: CLASS.tip,
         role: 'group',
         'aria-label': t('tip.title'),
-        // 气泡必须自己带 `data-phase`：它是时钟根节点的**兄弟**，继承不到那边设的阶段变量。
-        // 少了这一句，`var(--dsp-pc-ring, …)` 会永远落到兜底色，三个阶段同一个颜色且完全静默。
+        // 留作排查用（肉眼能在元素面板里看到当前阶段），颜色本身不依赖它。
         'data-phase': snap.phase,
-        // 外环与内盘都读这个值画进度 —— 和圆盘用的是同一个自定义属性名。
-        style: { '--dsp-pc-progress': `${Math.round(snap.progress * 100)}%` },
+        style: {
+          // 阶段色：外环两段 + 内盘两段，内联，见上面的 TIP_PHASE_VARS。
+          ...(TIP_PHASE_VARS[snap.phase] ?? TIP_PHASE_VARS.focus),
+          // 进度值：和圆盘共用同一个自定义属性名，外环与内盘都读它画扇形。
+          '--dsp-pc-progress': `${Math.round(snap.progress * 100)}%`,
+        },
       },
       h('button', {
         type: 'button',
