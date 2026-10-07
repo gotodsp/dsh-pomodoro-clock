@@ -4,7 +4,7 @@
  * 挂载在全窗口浮层 `shell.overlay` 里，有三种形态：
  *   · 面板态：番茄图标 + 标题 + 收起按钮 / 阶段胶囊标签 / 超大倒计时 / 反色主按钮；
  *   · 圆盘态：62px 圆盘，外环是本阶段进度，中心是倒计时；
- *   · 休息气泡：短休/长休期间在**屏幕正中央**浮出 148px 圆形气泡（阶段名 / 剩余时间 / 提醒句），
+ *   · 休息气泡：短休/长休期间在**屏幕正中央**浮出 180px 圆形气泡（**放大版圆盘**：外环阶段色 + 内盘两段 + 倒计时，下接一句提醒），
  *     点 ✕ 缩成挨着圆盘的 30px 小圆点，休息一结束就散掉。
  *
  * 计时模型在 `apply` 里只创建一次，所以收起、切会话、刷新页面都不会打断倒计时。
@@ -156,7 +156,7 @@ window.__ModuleLoader__.load({
       btn: 'dsp-pc-btn',
       tip: 'dsp-pc-tip',
       tipClose: 'dsp-pc-tip-close',
-      tipPhase: 'dsp-pc-tip-phase',
+      tipInner: 'dsp-pc-tip-inner',
       tipTime: 'dsp-pc-tip-time',
       tipText: 'dsp-pc-tip-text',
       tipDot: 'dsp-pc-tip-dot',
@@ -230,9 +230,13 @@ window.__ModuleLoader__.load({
       // `body[data-ds-dark-theme]` 是宿主 layout presenter 维护的暗色属性，
       // 宿主自己的主题 CSS 用的也是它。
       `body[data-ds-dark-theme] .${CLASS.root}{${paletteDecls('dark')}}`,
-      `.${CLASS.root}[data-phase="focus"]{--dsp-pc-ring:var(--dsp-pc-ring-focus);--dsp-pc-ring-soft:var(--dsp-pc-ring-focus-soft);--dsp-pc-dial:var(--dsp-pc-dial-focus);--dsp-pc-dial-rest:var(--dsp-pc-dial-focus-rest)}`,
-      `.${CLASS.root}[data-phase="short"]{--dsp-pc-ring:var(--dsp-pc-ring-short);--dsp-pc-ring-soft:var(--dsp-pc-ring-short-soft);--dsp-pc-dial:var(--dsp-pc-dial-short);--dsp-pc-dial-rest:var(--dsp-pc-dial-short-rest)}`,
-      `.${CLASS.root}[data-phase="long"]{--dsp-pc-ring:var(--dsp-pc-ring-long);--dsp-pc-ring-soft:var(--dsp-pc-ring-long-soft);--dsp-pc-dial:var(--dsp-pc-dial-long);--dsp-pc-dial-rest:var(--dsp-pc-dial-long-rest)}`,
+      // 阶段变量必须**同时**发给气泡：气泡和时钟根节点是**兄弟**（都直接挂在整帧浮层里），
+      // 兄弟之间不继承自定义属性。早先只写给 `.dsp-pc-root`，于是气泡里 `var(--dsp-pc-ring, …)`
+      // 每次都落到兜底值 —— 三个阶段全渲染成同一个颜色，且完全静默。
+      // 气泡自己带 `data-phase`（见 BreakTip），这里把选择器扩成两者。
+      `.${CLASS.root}[data-phase="focus"],.${CLASS.tip}[data-phase="focus"]{--dsp-pc-ring:var(--dsp-pc-ring-focus);--dsp-pc-ring-soft:var(--dsp-pc-ring-focus-soft);--dsp-pc-dial:var(--dsp-pc-dial-focus);--dsp-pc-dial-rest:var(--dsp-pc-dial-focus-rest)}`,
+      `.${CLASS.root}[data-phase="short"],.${CLASS.tip}[data-phase="short"]{--dsp-pc-ring:var(--dsp-pc-ring-short);--dsp-pc-ring-soft:var(--dsp-pc-ring-short-soft);--dsp-pc-dial:var(--dsp-pc-dial-short);--dsp-pc-dial-rest:var(--dsp-pc-dial-short-rest)}`,
+      `.${CLASS.root}[data-phase="long"],.${CLASS.tip}[data-phase="long"]{--dsp-pc-ring:var(--dsp-pc-ring-long);--dsp-pc-ring-soft:var(--dsp-pc-ring-long-soft);--dsp-pc-dial:var(--dsp-pc-dial-long);--dsp-pc-dial-rest:var(--dsp-pc-dial-long-rest)}`,
       // 共享的浮起面板外观：沿用宿主弹层的表面与投影，并给出 token 兜底。
       `.${CLASS.card},.${CLASS.mini}{position:absolute;border:1px solid var(--dsw-alias-border-l1);`,
       `background:var(--dsw-specific-menu,var(--dsw-alias-bg-overlay));`,
@@ -321,28 +325,38 @@ window.__ModuleLoader__.load({
       `color:var(--dsw-alias-label-primary);`,
       `font-size:12px;font-weight:600;line-height:1;font-variant-numeric:tabular-nums}`,
       // ---- 休息气泡 ----
-      // 148px 圆形气泡，**屏幕正中央**。定位交给整帧浮层（`shell.overlay` 是 inset:0 的层），
+      // **放大版的圆盘**：不是另一个新物件，而是角落那个 62px 圆盘放大到 180px，用的是
+      // 同一套 token、同一套结构（外环阶段色两段 + 内盘深一档两段 + 中心读数），只多接一句文案。
+      // 这样"两个东西在报同一件事"就变成了"同一个东西临时变大"。
+      //
+      // 尺寸 180px、环 **9px**（不是按 62px 的比例放大到 15px）：环一粗就变成甜甜圈，
+      // 视觉重量全跑到环上，40px 的倒计时反而被压住，文案也没地方。**"样式一致"指的是
+      // 同一套颜色与结构，不是同一个比例** —— 圆盘小所以环相对粗，气泡大所以环相对细。
+      //
+      // 位置 = 屏幕正中央（`left/top:50%` + `translate:-50% -50%`）。这是刻意的取舍：它等于压在
+      // 对话正文和输入框上，是"存在感最强"也"最挡视线"的位置，代价由 ✕ → 小圆点那条退路兜着。
       // 不用 `position:fixed`：固定定位在带 transform 的祖先下会改参考系，而浮层这一层
       // 就是现成的坐标系 —— 圆盘的默认位置用的也是它。
-      // 正中央 = `left/top:50%` + `translate:-50% -50%`。这是刻意的取舍：它等于压在对话正文和
-      // 输入框上，是"存在感最强"也"最挡视线"的位置，代价由 ✕ → 小圆点那条退路兜着（点一下就让开）。
       // 垂直居中走 `translate` 而不是 `transform`：`transform` 要留给进出场动画的缩放，
       // 两者写在一起会互相覆盖（动画一跑，居中就没了）。
       `.${CLASS.tip}{position:absolute;left:50%;top:50%;translate:-50% -50%;`,
-      `box-sizing:border-box;width:148px;height:148px;padding:22px 18px;border-radius:50%;`,
-      `display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;text-align:center;`,
+      `box-sizing:border-box;width:180px;height:180px;padding:9px;border-radius:50%;display:grid;place-items:center;`,
       `border:1px solid var(--dsw-alias-border-l1);`,
-      `background:var(--dsw-specific-menu,var(--dsw-alias-bg-overlay));`,
-      `-webkit-backdrop-filter:blur(14px) saturate(1.3);backdrop-filter:blur(14px) saturate(1.3);`,
+      // 外环：与圆盘的 `.dsp-pc-ring` 同一套 conic-gradient，只是尺寸不同。
+      `background:conic-gradient(var(--dsp-pc-ring,var(--dsw-alias-state-error-primary)) var(--dsp-pc-progress,0%),var(--dsp-pc-ring-soft,var(--dsw-alias-state-error-primary)) 0);`,
       `box-shadow:var(--dsw-elevation-soft,0 8px 28px rgb(0 0 0 / 16%));`,
       `animation:dsp-pc-tip-in 240ms ease-out}`,
-      `.${CLASS.tipPhase}{font-size:11px;line-height:14px;font-weight:600;color:var(--dsw-alias-label-primary)}`,
-      `.${CLASS.tipTime}{font-size:22px;line-height:26px;color:var(--dsw-alias-label-primary);font-variant-numeric:tabular-nums}`,
+      // 内盘：与圆盘的 `.dsp-pc-ring-inner` 同一套（不透明两段实色），只是里面多了那句文案。
+      `.${CLASS.tipInner}{width:162px;height:162px;border-radius:50%;display:flex;flex-direction:column;`,
+      `align-items:center;justify-content:center;text-align:center;`,
+      `background:conic-gradient(var(--dsp-pc-dial,var(--dsw-alias-bg-overlay)) var(--dsp-pc-progress,0%),var(--dsp-pc-dial-rest,var(--dsw-alias-bg-overlay)) 0)}`,
+      `.${CLASS.tipTime}{font-size:40px;line-height:1;font-weight:600;color:var(--dsw-alias-label-primary);`,
+      `font-variant-numeric:tabular-nums;margin-bottom:9px}`,
       // 提醒句：换句时靠 React 的 key 换掉这个节点，这条动画随之重放（见 BreakTip）。
-      `.${CLASS.tipText}{font-size:11px;line-height:15px;color:var(--dsw-alias-label-secondary);`,
+      `.${CLASS.tipText}{font-size:11px;line-height:15px;max-width:126px;color:var(--dsw-alias-label-secondary);`,
       `overflow-wrap:anywhere;animation:dsp-pc-tip-text 260ms ease-out}`,
-      // ✕：留在圆内（顶到圆外会露在圆形背景之外），按下不抢焦点。
-      `.${CLASS.tipClose}{position:absolute;top:22px;right:26px;box-sizing:border-box;display:inline-flex;`,
+      // ✕：留在圆内（顶到圆外会露在圆形背景之外），按下不抢焦点。位置随 180px 外收。
+      `.${CLASS.tipClose}{position:absolute;top:28px;right:34px;box-sizing:border-box;display:inline-flex;`,
       `align-items:center;justify-content:center;width:20px;height:20px;padding:0;border:none;border-radius:999px;`,
       `background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;line-height:1;cursor:pointer}`,
       `.${CLASS.tipClose}:hover{background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary)}`,
@@ -1248,7 +1262,8 @@ window.__ModuleLoader__.load({
     // --- tip-round:end ---
 
     /**
-     * **屏幕正中央**的 148px 圆形气泡：三行 = 阶段名 / 剩余时间 / 提醒句。
+     * **屏幕正中央**的 180px 圆形气泡：**放大版的圆盘** —— 外环阶段色（已走实心 / 未走淡）、
+     * 内盘深一档的两段色、中心 40px 倒计时，下面接一句提醒。不再显示阶段名（圆盘上本来也没有）。
      *
      * 它和时钟根节点是**兄弟**（都直接挂在整帧浮层里）：气泡的参考系是整帧（正中央），
      * 时钟是被拖动或贴着右下角的另一个盒子，两者不能共用一个容器。各是各的尺寸，
@@ -1265,6 +1280,11 @@ window.__ModuleLoader__.load({
         className: CLASS.tip,
         role: 'group',
         'aria-label': t('tip.title'),
+        // 气泡必须自己带 `data-phase`：它是时钟根节点的**兄弟**，继承不到那边设的阶段变量。
+        // 少了这一句，`var(--dsp-pc-ring, …)` 会永远落到兜底色，三个阶段同一个颜色且完全静默。
+        'data-phase': snap.phase,
+        // 外环与内盘都读这个值画进度 —— 和圆盘用的是同一个自定义属性名。
+        style: { '--dsp-pc-progress': `${Math.round(snap.progress * 100)}%` },
       },
       h('button', {
         type: 'button',
@@ -1275,15 +1295,17 @@ window.__ModuleLoader__.load({
         'aria-label': t('action.dismissTip'),
         title: t('action.dismissTip'),
       }, closeIcon()),
-      h('span', { className: CLASS.tipPhase }, phaseLabelOf(t, snap.phase)),
-      // 剩余时间与卡片/圆盘读同一个 snapshot，所以秒级 tick 照常刷新它。
-      h('div', { className: CLASS.tipTime, role: 'timer', 'aria-live': 'off' }, snap.text),
-      // key 换成句子就重挂这一行，CSS 的淡入随之重放：默认句 → AI 句是"换"而不是"跳"。
-      // sentence 为 null 时显示 i18n 的默认句 —— 中文不写死在逻辑里。
-      h('span', {
-        key: sentence ?? 'tip-fallback',
-        className: CLASS.tipText,
-      }, sentence ?? t('tip.fallback')))
+      // 内盘：与圆盘同构，只在读数下面多接一句提醒。**不再显示阶段名** —— 圆盘本来就没有，
+      // 阶段由环的颜色表达；重复写一个名字正是"挤"和"不好看"的来源。
+      h('div', { className: CLASS.tipInner },
+        // 剩余时间与卡片/圆盘读同一个 snapshot，所以秒级 tick 照常刷新它。
+        h('div', { className: CLASS.tipTime, role: 'timer', 'aria-live': 'off' }, snap.text),
+        // key 换成句子就重挂这一行，CSS 的淡入随之重放：默认句 → AI 句是"换"而不是"跳"。
+        // sentence 为 null 时显示 i18n 的默认句 —— 中文不写死在逻辑里。
+        h('span', {
+          key: sentence ?? 'tip-fallback',
+          className: CLASS.tipText,
+        }, sentence ?? t('tip.fallback'))))
     }
 
     /**
