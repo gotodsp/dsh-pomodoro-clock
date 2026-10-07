@@ -3,12 +3,13 @@
 //   node test/tip.test.mjs
 //
 // 这里测纯函数（prompt 构造、输出清洗与长度校验、同源判定），以及注入了假 llm 的生成编排：
-// 以上都无网络、无副作用。HTTP 路由本体是薄适配层，不进这里（它靠 Task 4 的实机验证）。
-// 做法与 test/model.test.mjs 一致：一个 check() 帮手 + 末尾按失败数决定退出码，
-// 方便后续任务顺序追加。
+// 以上都无网络、无副作用。HTTP 路由本体的状态/响应头映射不进这里（它靠 Task 4 的实机验证）；
+// 唯一的例外是最后一组「catch-all 留痕」——它用假 ctx 装载真实的 apply/handleTip，只为钉住
+// 「未预料异常也必须有痕」这一条不变量。
+// 做法与 test/model.test.mjs 一致：一个 check() 帮手 + 末尾按失败数决定退出码，方便后续任务顺序追加。
 import assert from 'node:assert/strict'
 
-import { buildTipPrompt, isSameOrigin, resolveTip, sanitizeTip, TIP_ANGLES, validateTip } from '../index.js'
+import { apply, buildTipPrompt, isSameOrigin, resolveTip, sanitizeTip, TIP_ANGLES, validateTip } from '../index.js'
 
 let checks = 0
 let failures = 0
@@ -624,6 +625,91 @@ group('同源检查 isSameOrigin')
   assert.equal(isSameOrigin('://', 'localhost:52341'), false)
   assert.equal(isSameOrigin('localhost:52341', 'localhost:52341'), false)
   check(true, '无法解析的 Origin（含 "null"、缺 scheme）拒绝且不抛异常', 'null / :// / localhost:52341')
+}
+
+// ------------------------------------------------------------ catch-all 留痕（修复轮 5）
+
+group('handler 未预料异常的留痕')
+{
+  // 为什么这条进单测：本路由对外只有 200 与 204 两种结果，**204 与「插件坏了 / 路由没注册」
+  // 完全同形**，唯一的分辨手段就是宿主日志里那一行短码（见 index.js 文件头与 logTipFailure）。
+  // 修复前的 catch 是 `if (!res.headersSent) noContent(res)`：resolveTip 之外的任何异常——抛错的
+  // ctx.get / currentSelection()、将来在 writeHead 之前引入的回归——都静默 204，读文件头那句
+  // 排查指引的人只会去查「路由是不是没注册」，而路由恰恰是注册着的。
+  //
+  // 这里用假 ctx 装载**真实的** apply/handleTip，把异常放进 resolveTip 之外。只钉这一条不变量；
+  // handler 的状态码与响应头映射仍由实机验证覆盖（轻量假 ctx 不适合当那部分的契约测试）。
+  function loadTipRoute(get, { loggerThrows = false } = {}) {
+    const routes = []
+    const logs = []
+    const child = {
+      get,
+      logger: {
+        warn(message) {
+          if (loggerThrows) throw new Error('logger broken')
+          logs.push(message)
+        },
+      },
+      effect: (fn) => fn(),
+      webServer: { register: (route) => { routes.push(route); return () => {} } },
+    }
+    // 语义与真 cordis 对齐：inject 的回调拿到的就是注入了服务的 child ctx。
+    apply({ inject: (_deps, callback) => callback(child) })
+    return { route: routes.at(-1), logs }
+  }
+
+  const req = {
+    headers: { host: 'localhost:52341' },
+    url: '/pomodoro/tip?phase=short&round=3&done=7&angle=water&lang=zh',
+    on() {},
+  }
+  function fakeRes() {
+    const res = {
+      status: null,
+      headersSent: false,
+      body: undefined,
+      writeHead(status) { res.status = status; res.headersSent = true },
+      end(body) { res.body = body },
+    }
+    return res
+  }
+
+  const realWarn = console.warn
+  const warned = []
+  // console.warn 是 logTipFailure 在本 profile 里唯一确认有落点的出口；测它就要接管它，
+  // 免得测试输出里混进一行看起来像失败的 warn。末尾 finally 还原。
+  console.warn = (message) => warned.push(message)
+  try {
+    // (1) ctx.get 抛错（resolveTip 之外的最短路径）→ 204 空体，且**两个日志出口各写同一行**
+    const boomGet = loadTipRoute(() => { throw new Error('ctx.get 炸了') })
+    assert.equal(boomGet.route.path, '/pomodoro/tip')
+    const res1 = fakeRes()
+    await boomGet.route.handler(req, res1)
+    assert.equal(res1.status, 204)
+    assert.equal(res1.body, undefined)
+    assert.equal(boomGet.logs.length, 1)
+    assert.equal(warned.length, 1)
+    assert.ok(boomGet.logs[0].includes('handler-threw'))
+    assert.equal(boomGet.logs[0], warned[0])
+    check(true, 'handler 在 resolveTip 之外抛错 → 204 空体 + 一行短码（修复前完全静默）', boomGet.logs[0])
+
+    // (2) 换一个抛点（currentSelection()），并让两个日志出口同时坏掉 → 出口仍是 204 空体。
+    //     留痕只能「加一行」，不许改变状态决定，也不许把异常泄成 500。
+    const badSelection = loadTipRoute(
+      (name) => (name === 'llm' ? {} : { currentSelection() { throw new Error('selection 炸了') } }),
+      { loggerThrows: true },
+    )
+    console.warn = () => { throw new Error('console.warn broken') }
+    const res2 = fakeRes()
+    await badSelection.route.handler(req, res2)
+    assert.equal(res2.status, 204)
+    assert.equal(res2.body, undefined)
+    assert.equal(badSelection.logs.length, 0)
+    check(true, 'currentSelection() 抛错且两个日志出口都坏掉 → 仍然 204 空体（留痕不参与状态决定）',
+      'logger.warn 与 console.warn 都抛')
+  } finally {
+    console.warn = realWarn
+  }
 }
 
 // ---------------------------------------------------------------- 汇总

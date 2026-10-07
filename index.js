@@ -3,9 +3,11 @@
  *
  * 时钟本身完全跑在浏览器入口（`./client`）里：倒计时、它的设置、它的持久化，以及它挂进整帧
  * `shell.overlay` 层的悬浮控件。宿主半只负责休息气泡需要的那一块：`apply` 注册无状态的只读
- * 路由 `/pomodoro/tip`，客户端在休息开始时拉一次。所有失败路径都回 204，气泡保留默认句。
- * **对外 204 与「插件坏了」完全同形**，所以生成失败时 handler 会往宿主日志写一行短码
- * （见 logTipFailure）——排查「AI 句一直不出现」先看那一行，别先怀疑路由没注册。
+ * 路由 `/pomodoro/tip`。**客户端还没有调用它**——「休息开始时拉一次」是 Task 5 的接线工作，
+ * 本文件这一侧先就位。所有失败路径都回 204，气泡保留默认句。
+ * **对外 204 与「插件坏了」完全同形**，所以失败时 handler 会往宿主日志写一行短码（见
+ * logTipFailure）：既包括生成失败，也包括 handler 自己在 resolveTip 之外抛出的未预料异常。
+ * 排查「AI 句一直不出现」先看那一行，别先怀疑路由没注册。
  *
  * 本模块**每个宿主进程只求值一次**（Node 的 ESM 按解析后的 URL 缓存模块）。DSH 的 HMR 在本
  * profile 里 `root: []`，即不监听模块文件；插件管理器的 disable/enable（以及 bundle 的开关）
@@ -467,7 +469,9 @@ function noContent(res) {
  *
  * 这条路由对外只有两种可见结果：200 带正文，或 204 空体。**生成失败与插件坏掉在 HTTP 上完全同形**
  * （都是 204），所以失败必须留一行痕，否则「AI 句一直不出现」无从查起。
- * 只记短码，不记模型正文（日志不落用户内容）；只在**输入合法、但句子没生成出来**时记——
+ * 只记短码，不记模型正文（日志不落用户内容）；两条触发路径：
+ *   - 输入合法、但句子没生成出来（resolveTip 的每条失败出口，短码见各调用点）；
+ *   - handler 里任何未预料的异常（短码 `handler-threw`；成因必是内部故障，见 handleTip 的 catch）。
  * 跨站 Origin 与非法 query 是客户端自己的问题，不记。
  *
  * 两个出口都写，因为**它们各自都可能是空的**（2026-10-07 实机分别验过）：
@@ -587,7 +591,15 @@ async function handleTip(ctx, req, res) {
     res.writeHead(200, { 'cache-control': 'no-store', 'content-type': 'application/json; charset=utf-8' })
     res.end(JSON.stringify({ text }))
   } catch {
-    // 任何未预料的异常（例如畸形 URL）都不许泄成 500：还没发响应就按失败路径回 204。
+    // 任何未预料的异常（ctx.get / currentSelection() 抛错、将来在 writeHead 之前引入的回归）
+    // 都不许泄成 500：还没发响应就按失败路径回 204。**并且必须先留一行痕再回**——204 与
+    // 「插件坏了 / 路由没注册」在 HTTP 上完全同形，不记的话文件头那句排查指引会把人引向错结论
+    // （去查路由表，而不是查这份 handler），这正是本修复轮要消灭的失败类。
+    // 这条也不会被客户端输入触发：webServer 分发前已经用同一句
+    // `new URL(req.url ?? '/', 'http://x').pathname` 解析过请求目标（见 dsh-host-webserver 的
+    // handle()），能命中本路由的目标一定解析得开，所以走到这里的只可能是内部故障。
+    // logTipFailure 的两个出口各自有 try（见其注释），所以这一行既不会抛、也不参与状态决定。
+    logTipFailure(ctx, 'handler-threw')
     if (!res.headersSent) noContent(res)
   }
 }
