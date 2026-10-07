@@ -91,8 +91,10 @@ Expected: PASS，退出码 0
 
 - [ ] **Step 5: 提交**
 
+`package.json` 的 `scripts.test` 改为同时跑两个测试文件（`node test/model.test.mjs && node test/tip.test.mjs`）。**不改的话新测试永远不进 CI，而后续任务的"跑全部测试"会静默只跑旧测试。**
+
 ```
-git add index.js test/tip.test.mjs
+git add index.js test/tip.test.mjs package.json
 git commit -m "休息提醒：prompt 构造（纯函数 + 测试）"
 ```
 
@@ -170,20 +172,22 @@ git commit -m "休息提醒：输出清洗与长度校验"
 **Interfaces:**
 - Consumes: Task 1 的 `buildTipPrompt`、`TIP_ANGLES`；Task 2 的 `sanitizeTip`、`validateTip`
 - Produces:
-  - `export async function resolveTip(deps: { llm: { stream(o: object): AsyncIterable<object> } | undefined, provider: string, model: string }, input: { phase, round, done, angle, lang }): Promise<string | null>`
+  - `export async function resolveTip(deps: { llm: { stream(o: object): AsyncIterable<object> } | undefined, provider: string, model: string, signal?: AbortSignal }, input: { phase, round, done, angle, lang }): Promise<string | null>`
   - 返回值：可用的句子，或 `null`（调用方把 `null` 映射成 204）
 
 `deps.llm` 为 `undefined` 时立即返回 `null`（第一道降级，早于任何 I/O）。
 
+**`deps.signal` 必须与内部 3 秒超时合并使用**（`AbortSignal.any([deps.signal, AbortSignal.timeout(3000)])`，`deps.signal` 缺席时退化为只用自己的超时）。只取其一都是错的：只用外部 signal 会让慢响应挂住请求，只用内部超时会让用户切走后模型调用继续跑并计费。
+
 - [ ] **Step 1: 写失败测试（用假 llm，覆盖失败矩阵）**
 
 ```js
+const input = { phase: 'short', round: 1, done: 1, angle: 'water', lang: 'zh' }
 const okLlm = (chunks) => ({ stream: async function* () { for (const c of chunks) yield c } })
 const textChunks = (s) => [{ type: 'text-delta', text: s }, { type: 'finish', reason: { kind: 'stop' } }]
 
 // 正常：攒 text-delta
-const good = await resolveTip({ llm: okLlm(textChunks('去接杯水吧')), provider: 'p', model: 'm' },
-  { phase: 'short', round: 1, done: 1, angle: 'water', lang: 'zh' })
+const good = await resolveTip({ llm: okLlm(textChunks('去接杯水吧')), provider: 'p', model: 'm' }, input)
 assert.equal(good, '去接杯水吧')
 
 // llm 服务缺席 → null，且不抛
@@ -202,8 +206,11 @@ assert.equal(await resolveTip({ llm: okLlm(textChunks(long)), provider: 'p', mod
 // finish 为 error / aborted 时不采纳已攒内容
 assert.equal(await resolveTip({ llm: okLlm([{ type: 'text-delta', text: '去接杯水吧' }, { type: 'finish', reason: { kind: 'error' } }]), provider: 'p', model: 'm' }, input), null)
 
-// 慢响应必须被 3 秒超时切断（用假的慢流，断言在 3200ms 内返回 null）
-// 实现里对传入的 signal 生效；测试注入一个立刻 abort 的 signal 来断言 "aborted → null"
+// 外部 signal 已 abort → null（路由在客户端断开时会这样调）
+// 注意：不要在这里真等 3 秒去测内部超时，那会让每个用例慢 3 秒；
+// 内部超时是否生效由 Task 4 Step 5 的实机验证覆盖。
+const ac = new AbortController(); ac.abort()
+assert.equal(await resolveTip({ llm: okLlm(textChunks('去接杯水吧')), provider: 'p', model: 'm', signal: ac.signal }, input), null)
 ```
 
 - [ ] **Step 2: 运行测试确认失败**
@@ -303,13 +310,17 @@ git commit -m "休息提醒：宿主路由 + 同源检查"
 - Test: `test/tip.test.mjs`（追加角度轮换的纯函数测试）
 
 **Interfaces:**
-- Consumes: Task 1 的 `TIP_ANGLES` 顺序（客户端按同一顺序轮换）
+- Consumes: Task 4 的 query 参数约定（`phase` / `round` / `done` / `angle` / `lang`）
 - Produces:
-  - `export function nextAngle(prev: string): string`（在 `client.js` 内，供轮换用）
+  - `client.js` 内一个**本地的**角度 id 列表与 `nextAngle(prev: string): string`
+
+**客户端不能 import 宿主半。** `client.js` 是浏览器 bundle，宿主半的 `index.js` 是 ESM 模块，两者不共享模块系统——所以角度 id 列表在客户端**必须自带一份副本**，与 Task 1 的 `TIP_ANGLES` 顺序一致。这是平台的硬边界，不是选择。缓解是宿主对未知角度一律回退到第一个（Task 1 已实现），所以最坏情况只是新角度暂不被使用，不会报错。
 
 - [ ] **Step 1: 写失败测试**
 
-`client.js` 是浏览器 bundle、不能直接 import，所以沿用现有 `test/model.test.mjs` 的**标记切片法**：在 `client.js` 里用 `// --- tip-angle:start ---` / `// --- tip-angle:end ---` 包住 `nextAngle`，测试按标记切出来求值。
+`client.js` 是浏览器 bundle、不能直接 import，所以沿用现有 `test/model.test.mjs` 的**标记切片法**：在 `client.js` 里用 `// --- tip-angle:start ---` / `// --- tip-angle:end ---` 把**客户端自己的角度列表**和 `nextAngle` **一起**包住（`nextAngle` 依赖那个列表，切片里少了它就跑不起来），测试按标记切出来求值后使用。
+
+下面断言里的 `TIP_ANGLES` 指的是**切片出来的那一份**，不是 Task 1 里 `index.js` 导出的同名常量——两者是各自独立的副本，客户端拿不到宿主的那份。
 
 ```js
 // 轮换一圈回到起点，且每次都变
@@ -321,6 +332,10 @@ assert.equal(nextAngle(TIP_ANGLES[TIP_ANGLES.length - 1]), TIP_ANGLES[0])
 
 // 未知值不抛，退到第一个
 assert.equal(nextAngle('nope'), TIP_ANGLES[0])
+
+// 客户端副本必须与宿主半那份一致（漂移会让新角度永远不被使用）
+import { TIP_ANGLES as HOST_ANGLES } from '../index.js'
+assert.deepEqual(TIP_ANGLES, HOST_ANGLES)
 ```
 
 - [ ] **Step 2: 运行测试确认失败**
