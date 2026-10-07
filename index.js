@@ -97,20 +97,35 @@ const TIP_QUOTE_PAIRS = [
   ["'", "'"],
 ]
 
-/** 开头的客套话术。**必须跟着分隔符**才算数（否则会把「好的心情」这类正文削掉），可连续出现多次。 */
-const TIP_POLITE_OPENER = /^(?:(?:好的|好呀|好嘞|没问题|当然|可以|明白|收到|OK|Okay|Sure|Alright|Of course)[,，、:：!！.。\s]+)+/iu
+/** 开头的客套话术。**必须跟着标点**才算数，可连续出现多次。
+ *  分隔符里不能含空白：只跟空格的话，`Sure thing, stretch your legs` 会被削成
+ *  `thing, stretch your legs`——正文缺了主语，而校验器完全看不出这种损坏。 */
+const TIP_POLITE_OPENER = /^(?:(?:好的|好呀|好嘞|没问题|当然|可以|明白|收到|OK|Okay|Sure|Alright|Of course)[,，、:：!！.。]+)+/iu
 
 /** 换行与制表符：一律直接删掉，不换成空格——中文句子被换行拆开时，换空格会多出一个空档。 */
 const TIP_LINE_BREAK = /[\n\r\t\u2028\u2029]+/g
 
+/** 英文换行补空格：仅当换行两侧都是 ASCII 词字符时，先把换行换成一个空格，再由 TIP_LINE_BREAK 删净。
+ *  否则 `go grab\nsome water` 会粘成 `go grabsome water`，照样通过英文词数校验、把错字送进气泡。
+ *  裁定的形式是 `(?<=[A-Za-z0-9_])\n(?=[A-Za-z0-9_])`；这里写成 `[\r\n]+`，把 CRLF 与连续空行当作
+ *  同一个断口——判据没有变（两侧仍须是 ASCII 词字符），但 `go grab\r\nsome water`、
+ *  `go grab\n\nsome water` 也不会再粘连。汉字不是 ASCII 词字符，所以 `水\n吧` 依旧变成 `水吧`。 */
+const TIP_ASCII_LINE_BREAK = /(?<=[A-Za-z0-9_])[\r\n]+(?=[A-Za-z0-9_])/g
+
 /** emoji：扩展象形字符，外加区域指示符（成对拼出国旗，单个不在象形范围内）。 */
 const TIP_EMOJI = /[\p{Extended_Pictographic}\p{Regional_Indicator}]/u
 
-/** 换行：清洗阶段已经删过，校验阶段再挡一次，防止调用方跳过清洗直接把原文递进来。 */
-const TIP_NEWLINE = /[\n\r\u2028\u2029]/
+/** 换行与制表符：清洗阶段已经删过，校验阶段再挡一次，防止调用方跳过清洗直接把原文递进来。
+ *  制表符必须一起挡：它与换行同属 TIP_LINE_BREAK，漏掉它 `站\t起来走两步`（6 个汉字）会被判 true。 */
+const TIP_NEWLINE_OR_TAB = /[\n\r\t\u2028\u2029]/
 
 /** 汉字（CJK 统一表意文字）。中文字数只数它们：标点、空白、字母、数字都不计入。 */
 const TIP_HAN = /[\u4e00-\u9fff]/
+
+/** 气泡能装下的总码点上限，中英都叠这一条：只卡汉字数会漏掉「汉字 + 长英文尾巴」，
+ *  实测 `站起来走两步 go walk around the block and back again` 有 46 个码点仍判 true，148px 装不下。
+ *  30 让 prompt 合规的 25 码点样例照样通过，把 46 码点那种挡下。 */
+const TIP_MAX_CODE_POINTS = 30
 
 /** 脱掉最外层成对的引号，可嵌套（「"…"」）。落单的引号不猜着删。 */
 function stripWrappingQuotes(text) {
@@ -132,7 +147,7 @@ function countHan(text) {
 /**
  * 清洗模型返回的一句话。
  * 顺序：首尾空白 → 脱包裹引号 → 削开头客套 → 再脱一次引号（客套削掉后才露出来的那些）
- * → 删掉换行与制表符 → 再 trim。清得干净不等于可用，可用性由 validateTip 判。
+ * → 英文换行处补一个空格 → 删掉换行与制表符 → 再 trim。清得干净不等于可用，可用性由 validateTip 判。
  * @param {string} raw 模型拼出来的原文
  * @returns {string} 清洗后的文本（可能是空串）
  */
@@ -140,6 +155,7 @@ export function sanitizeTip(raw) {
   let text = stripWrappingQuotes(raw.trim())
   text = text.replace(TIP_POLITE_OPENER, '').trim()
   text = stripWrappingQuotes(text)
+  text = text.replace(TIP_ASCII_LINE_BREAK, ' ')
   return text.replace(TIP_LINE_BREAK, '').trim()
 }
 
@@ -149,6 +165,7 @@ export function sanitizeTip(raw) {
  *   - zh：6–24 个汉字，**标点与空白不计入**。prompt 要求「12 到 20 个汉字」，正落在界内；
  *     若把标点也算进 6–24，一句 20 汉字 + 5 标点（25 个字符）的好回答会被自己拒掉。
  *   - en：3–12 个词，按空白分词，与英文 system 的「3 and 12 words」一致。
+ *   - 两种语言再叠一条总码点上限 30：汉字数或词数合规、但后面拖一条长尾巴的输出仍然装不下。
  * lang 只认 'en'，其余取值（含缺陷值）一律按中文校验，与 buildTipPrompt 的取值约定相同。
  * @param {string} text 待校验文本（通常是 sanitizeTip 的结果）
  * @param {'zh'|'en'} lang 界面语言
@@ -161,7 +178,9 @@ export function validateTip(text, lang) {
   const trimmed = text.trim()
   if (trimmed === '') return false
   if (TIP_EMOJI.test(trimmed)) return false
-  if (TIP_NEWLINE.test(trimmed)) return false
+  if (TIP_NEWLINE_OR_TAB.test(trimmed)) return false
+  // 码点数（不是 UTF-16 长度）：代理对只算一个，emoji 那种字符不会把上限翻倍。
+  if ([...trimmed].length > TIP_MAX_CODE_POINTS) return false
 
   if (lang === 'en') {
     const words = trimmed.split(/\s+/).length

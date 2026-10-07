@@ -169,12 +169,14 @@ group('中文长度只数汉字，标点不计入（本任务的边界裁定）'
 
 group('英文按词数 3–12')
 {
-  // 边界两侧各钉一个：3 词与 12 词通过，2 词与 13 词拒绝
+  // 边界两侧各钉一个：3 词与 12 词通过，2 词与 13 词拒绝。
+  // 12 词那条只能用单字母词：12 个 'walk' 是 59 码点，已被叠加的总码点上限 30 挡下（见修复组），
+  // 词数界本身仍要独立钉住，所以把词长压进上限之内。
   assert.equal(validateTip('go drink water', 'en'), true)
-  assert.equal(validateTip(Array.from({ length: 12 }, () => 'walk').join(' '), 'en'), true)
+  assert.equal(validateTip(Array.from({ length: 12 }, () => 'a').join(' '), 'en'), true)
   assert.equal(validateTip('go walk', 'en'), false)
-  assert.equal(validateTip(Array.from({ length: 13 }, () => 'walk').join(' '), 'en'), false)
-  check(true, '英文边界：3 词与 12 词过，2 词与 13 词拒', '3 / 12 → true，2 / 13 → false')
+  assert.equal(validateTip(Array.from({ length: 13 }, () => 'a').join(' '), 'en'), false)
+  check(true, '英文边界：3 词与 12 词过，2 词与 13 词拒（词长在上限内）', '3 / 12 → true，2 / 13 → false')
 
   // 形状检查在长度之前，且不分语言
   assert.equal(validateTip('go grab some water 🙂', 'en'), false)
@@ -186,6 +188,50 @@ group('英文按词数 3–12')
   assert.equal(validateTip('', 'zh'), false)
   assert.equal(validateTip('', 'en'), false)
   check(true, '空串对中英都拒（非空是第一道）', '空串')
+}
+
+// ------------------------------------------------------------ 评审修复轮
+
+group('修复轮：总码点上限、英文换行补空格、客套必须跟标点、校验器挡制表符')
+{
+  // 总码点上限 30（叠在汉字数界之上）：6 个汉字 + 40 个 ASCII = 46 码点，148px 的气泡装不下
+  const longTail = '站起来走两步 go walk around the block and back again'
+  assert.equal([...longTail].length, 46)
+  assert.equal(validateTip(longTail, 'zh'), false)
+  check(true, '汉字数合规但 46 码点的长尾巴被总上限 30 挡下', `${[...longTail].length} 码点 → false`)
+
+  // 上限不能把 prompt 合规的好答案一起拒掉：25 码点的样例仍在界内
+  const ok25 = '站起来走两步，去接水，抬头看远处，深呼吸，伸懒腰。'
+  assert.equal([...ok25].length, 25)
+  assert.equal(validateTip(ok25, 'zh'), true)
+  check(true, '总上限 30 不误杀 25 码点的合规样例', `${[...ok25].length} 码点 → true`)
+
+  // 上限的边界两侧：24 个汉字（汉字上界）恰好只留 6 个 ASCII 位
+  assert.equal(validateTip('一'.repeat(24) + 'x'.repeat(6), 'zh'), true)
+  assert.equal(validateTip('一'.repeat(24) + 'x'.repeat(7), 'zh'), false)
+  check(true, '总码点边界：30 过、31 拒（汉字数同为 24）', '30 → true，31 → false')
+
+  // 英文同样叠这条上限：12 个 'walk' 词数合规（12 ≤ 12），但 59 码点超上限
+  const twelveWalk = Array.from({ length: 12 }, () => 'walk').join(' ')
+  assert.equal([...twelveWalk].length, 59)
+  assert.equal(validateTip(twelveWalk, 'en'), false)
+  check(true, '英文词数合规但 59 码点，同样被总上限拒', `${[...twelveWalk].length} 码点 → false`)
+
+  // 英文换行必须先补一个空格再删，否则粘成一个词「grabsome」，还能通过词数校验进气泡
+  assert.equal(sanitizeTip('go grab\nsome water'), 'go grab some water')
+  check(true, '英文换行补空格：不再粘成「grabsome」', JSON.stringify(sanitizeTip('go grab\nsome water')))
+
+  // 反面：判据是「两侧都是 ASCII 词字符」，汉字不是，中文换行仍直接删掉
+  assert.equal(sanitizeTip('去接杯水\n吧'), '去接杯水吧')
+  check(true, '汉字之间的换行仍直接删掉，不补空格', JSON.stringify(sanitizeTip('去接杯水\n吧')))
+
+  // 客套前缀必须跟着标点：只跟空格的合法正文不能被削（削掉后校验器看不出损坏）
+  assert.equal(sanitizeTip('Sure thing, stretch your legs'), 'Sure thing, stretch your legs')
+  check(true, '只跟空格的 Sure 不算客套，正文不被削掉', sanitizeTip('Sure thing, stretch your legs'))
+
+  // 调用方跳过 sanitizeTip 时，校验器自己也要挡下制表符（站/起/来/走/两/步 = 6 个汉字，本来会过）
+  assert.equal(validateTip('站\t起来走两步', 'zh'), false)
+  check(true, '校验器直接挡下制表符（6 个汉字也不放行）', JSON.stringify('站\t起来走两步'))
 }
 
 // ---------------------------------------------------------------- 汇总
