@@ -157,6 +157,7 @@ window.__ModuleLoader__.load({
       tip: 'dsp-pc-tip',
       tipClose: 'dsp-pc-tip-close',
       tipInner: 'dsp-pc-tip-inner',
+      tipRing: 'dsp-pc-tip-ring',
       tipTime: 'dsp-pc-tip-time',
       tipText: 'dsp-pc-tip-text',
       tipDot: 'dsp-pc-tip-dot',
@@ -352,11 +353,16 @@ window.__ModuleLoader__.load({
       // 两者写在一起会互相覆盖（动画一跑，居中就没了）。
       `.${CLASS.tip}{position:absolute;left:50%;top:50%;translate:-50% -50%;`,
       `box-sizing:border-box;width:180px;height:180px;padding:9px;border-radius:50%;display:grid;place-items:center;`,
-      `border:1px solid var(--dsw-alias-border-l1);`,
-      // 外环：与圆盘的 `.dsp-pc-ring` 同一套 conic-gradient，只是尺寸不同。
-      `background:conic-gradient(var(--dsp-pc-ring,var(--dsw-alias-state-error-primary)) var(--dsp-pc-progress,0%),var(--dsp-pc-ring-soft,var(--dsw-alias-state-error-primary)) 0);`,
       `box-shadow:var(--dsw-elevation-soft,0 8px 28px rgb(0 0 0 / 16%));`,
       `animation:dsp-pc-tip-in 240ms ease-out}`,
+      // 外环改用 **SVG** 画，不用 conic-gradient。
+      //
+      // 原因：浏览器把 conic-gradient 拆成**四个象限**栅格化，四条象限边界（正上、正右、正下、
+      // 正左）会留下 1px 的接缝。9px 宽的环上，接缝横穿整条环，看起来就是"每一边中间有一小段
+      // 有颜色的线"（实测反馈）。SVG 的 `<circle>` 一次描边成形，没有象限拼接，也没有接缝。
+      // 顺带的好处：环宽就是 `stroke-width`，不必再靠 padding 反推。
+      // r=85.5、stroke-width=9 → 环占 r 81~90；内盘 r=81（162px），两者正好接上。
+      `.${CLASS.tipRing}{position:absolute;inset:0;width:180px;height:180px;display:block;pointer-events:none}`,
       // 内盘：与圆盘的 `.dsp-pc-ring-inner` 同一套（不透明两段实色），只是里面多了那句文案。
       `.${CLASS.tipInner}{width:162px;height:162px;border-radius:50%;display:flex;flex-direction:column;`,
       `align-items:center;justify-content:center;text-align:center;`,
@@ -1314,7 +1320,14 @@ window.__ModuleLoader__.load({
       },
     }
 
+    // 气泡外环的几何：半径与周长。SVG 用 dasharray/dashoffset 表示进度，周长是个常数。
+    // r = 85.5：180px 泡、9px 环 → 环中线落在 r=85.5，占 r 81~90，与 162px 内盘（r=81）严丝合缝。
+    const TIP_RING_R = 85.5
+    const TIP_RING_C = 2 * Math.PI * TIP_RING_R
+
     function BreakTip({ snap, t, sentence, onDismiss }) {
+      // 进度按 0~1 收口：NaN / 越界值都会让 dashoffset 变成无效字符串，环直接画不出来。
+      const tipPercent = Math.min(1, Math.max(0, Number(snap.progress) || 0))
       return h('div', {
         className: CLASS.tip,
         role: 'group',
@@ -1337,6 +1350,28 @@ window.__ModuleLoader__.load({
         'aria-label': t('action.dismissTip'),
         title: t('action.dismissTip'),
       }, closeIcon()),
+      // 外环：**SVG 描边**，不用 conic-gradient —— 后者在四个象限边界会留 1px 接缝，
+      // 9px 宽的环上表现为"每一边正中出现一小段有颜色的线"（实测反馈）。
+      // r=85.5、stroke-width=9 → 环占 r 81~90；内盘 162px（r=81）与之正好接上，不留缝。
+      // 进度用 dasharray/dashoffset 表达，起点靠 rotate(-90) 挪到正上方。
+      // 画在按钮与内盘**之间**：接缝没有了，但 ✕ 落在内盘范围内（距圆心约 69 < 81），不会被环压到。
+      h('svg', {
+        className: CLASS.tipRing,
+        viewBox: '0 0 180 180',
+        'aria-hidden': 'true',
+        focusable: 'false',
+      },
+      h('circle', {
+        cx: 90, cy: 90, r: TIP_RING_R, fill: 'none', strokeWidth: 9,
+        stroke: 'var(--dsp-pc-ring-soft,var(--dsw-alias-state-error-primary))',
+      }),
+      h('circle', {
+        cx: 90, cy: 90, r: TIP_RING_R, fill: 'none', strokeWidth: 9,
+        stroke: 'var(--dsp-pc-ring,var(--dsw-alias-state-error-primary))',
+        strokeDasharray: TIP_RING_C,
+        strokeDashoffset: TIP_RING_C * (1 - tipPercent),
+        transform: 'rotate(-90 90 90)',
+      })),
       // 内盘：与圆盘同构，只在读数下面多接一句提醒。**不再显示阶段名** —— 圆盘本来就没有，
       // 阶段由环的颜色表达；重复写一个名字正是"挤"和"不好看"的来源。
       h('div', { className: CLASS.tipInner },
