@@ -14,7 +14,10 @@
 
 - **不新增任何运行时依赖。** 宿主与客户端都只用平台自带能力。
 - **所有代码注释用中文。** 与现有两个文件一致。
-- **模型调用不得传 `reasoningEffort`**，并且**不得传 `purpose`**（该字段只接受 `compaction | session-title`，没有给插件留位置）。
+- **模型调用必须显式传 `reasoningEffort: 'off'`**，并且**不得传 `purpose`**（该字段只接受 `compaction | session-title`，没有给插件留位置）。
+  **这条被本计划写错过，后来改的**：原文是"不传 `reasoningEffort`，让适配器用它的默认"，而那个默认就是
+  `high` —— 实测约 50 个 `reasoning-delta` 把 `maxTokens: 60` 吃光，最终 `finish{kind:'max-tokens'}`
+  且**零 `text-delta`**，fail-closed 返回 `null` → 永远静默 204。是实机验证抓出来的。
 - **`maxTokens: 60`**，宿主超时 **3000ms**，客户端 fetch 超时 **3500ms**。
 - **句子长度界（必须同时满足 prompt 口径与校验器口径，否则"生成即被自己拒"）**：zh 为 **12–20 汉字**（prompt）/ **汉字 6–24 且总码点 ≤ 30**（校验器）；en 为 **3–8 words 且整句不超过 60 个字符**（prompt）/ **3–8 词且总码点 ≤ 60**（校验器）。
   **不变量要写准**：词数/汉字数的范围必须落在校验器的同单位界内；**码点上限是宽度兜底，prompt 也必须显式说出来**——只写词数范围会让"7 词但 63 码点"这种 prompt 合规句被上限拒掉（re-review 实测），那样这条不变量就是假的。
@@ -238,7 +241,7 @@ Expected: FAIL —— `resolveTip` 未定义
 
 - [ ] **Step 3: 实现 `resolveTip`**
 
-构造 `AbortSignal.timeout(3000)`；调 `deps.llm.stream({ provider, model, system, messages, maxTokens: 60, signal })`——**不传 `reasoningEffort`，不传 `purpose`**；累加 `text-delta`；`finish.reason.kind` 不是 `'stop'` 时返回 `null`；对结果跑 `sanitizeTip` + `validateTip`，不过则 `null`；整个函数体包在 try/catch 里，任何异常都返回 `null`。
+构造 `AbortSignal.timeout(3000)`；调 `deps.llm.stream({ provider, model, system, messages, maxTokens: 60, reasoningEffort: 'off', signal })`——**必须显式传 `reasoningEffort: 'off'`**（不传就是 `high`，会把 60 token 预算全烧在推理上、零文本输出），**不传 `purpose`**；累加 `text-delta`；`finish.reason.kind` 不是 `'stop'` 时返回 `null`；对结果跑 `sanitizeTip` + `validateTip`，不过则 `null`；整个函数体包在 try/catch 里，任何异常都返回 `null`。
 
 - [ ] **Step 4: 运行测试确认通过**
 
