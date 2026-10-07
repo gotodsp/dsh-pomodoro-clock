@@ -4,7 +4,7 @@
  * 挂载在全窗口浮层 `shell.overlay` 里，有三种形态：
  *   · 面板态：番茄图标 + 标题 + 收起按钮 / 阶段胶囊标签 / 超大倒计时 / 反色主按钮；
  *   · 圆盘态：62px 圆盘，外环是本阶段进度，中心是倒计时；
- *   · 休息气泡：短休/长休期间在中上方浮出 148px 圆形气泡（阶段名 / 剩余时间 / 提醒句），
+ *   · 休息气泡：短休/长休期间在**屏幕正中央**浮出 148px 圆形气泡（阶段名 / 剩余时间 / 提醒句），
  *     点 ✕ 缩成挨着圆盘的 30px 小圆点，休息一结束就散掉。
  *
  * 计时模型在 `apply` 里只创建一次，所以收起、切会话、刷新页面都不会打断倒计时。
@@ -321,14 +321,14 @@ window.__ModuleLoader__.load({
       `color:var(--dsw-alias-label-primary);`,
       `font-size:12px;font-weight:600;line-height:1;font-variant-numeric:tabular-nums}`,
       // ---- 休息气泡 ----
-      // 148px 圆形气泡，中上方。定位交给整帧浮层（`shell.overlay` 是 inset:0 的层），
+      // 148px 圆形气泡，**屏幕正中央**。定位交给整帧浮层（`shell.overlay` 是 inset:0 的层），
       // 不用 `position:fixed`：固定定位在带 transform 的祖先下会改参考系，而浮层这一层
       // 就是现成的坐标系 —— 圆盘的默认位置用的也是它。
-      // `--dsh-frame-overlay-top` 是宿主给浮层元素算好的「窗口顶栏之下 20px」（macOS 与
-      // Windows 各自把标题栏高度算进去了），普通网页里没有这个变量，用 32px 兜底。
-      // 水平居中走 `translate` 而不是 `transform`：`transform` 要留给进出场动画的缩放，
+      // 正中央 = `left/top:50%` + `translate:-50% -50%`。这是刻意的取舍：它等于压在对话正文和
+      // 输入框上，是"存在感最强"也"最挡视线"的位置，代价由 ✕ → 小圆点那条退路兜着（点一下就让开）。
+      // 垂直居中走 `translate` 而不是 `transform`：`transform` 要留给进出场动画的缩放，
       // 两者写在一起会互相覆盖（动画一跑，居中就没了）。
-      `.${CLASS.tip}{position:absolute;left:50%;top:var(--dsh-frame-overlay-top,32px);translate:-50% 0;`,
+      `.${CLASS.tip}{position:absolute;left:50%;top:50%;translate:-50% -50%;`,
       `box-sizing:border-box;width:148px;height:148px;padding:22px 18px;border-radius:50%;`,
       `display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;text-align:center;`,
       `border:1px solid var(--dsw-alias-border-l1);`,
@@ -1248,9 +1248,9 @@ window.__ModuleLoader__.load({
     // --- tip-round:end ---
 
     /**
-     * 中上方的 148px 圆形气泡：三行 = 阶段名 / 剩余时间 / 提醒句。
+     * **屏幕正中央**的 148px 圆形气泡：三行 = 阶段名 / 剩余时间 / 提醒句。
      *
-     * 它和时钟根节点是**兄弟**（都直接挂在整帧浮层里）：气泡的参考系是整帧（中上方），
+     * 它和时钟根节点是**兄弟**（都直接挂在整帧浮层里）：气泡的参考系是整帧（正中央），
      * 时钟是被拖动或贴着右下角的另一个盒子，两者不能共用一个容器。各是各的尺寸，
      * 浮层其余部分照旧点击穿透。
      * 不抢输入焦点：挂载时不调用 focus()，✕ 的 mousedown 也 preventDefault ——
