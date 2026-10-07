@@ -353,6 +353,9 @@ window.__ModuleLoader__.load({
       // 两者写在一起会互相覆盖（动画一跑，居中就没了）。
       `.${CLASS.tip}{position:absolute;left:50%;top:50%;translate:-50% -50%;`,
       `box-sizing:border-box;width:180px;height:180px;padding:9px;border-radius:50%;display:grid;place-items:center;`,
+      // 这圈 1px 描边是上一版"脆"的来源，换 SVG 时被我顺手删掉了 —— 观感立刻变糊。
+      // 环由 SVG 画，描边负责最外那一圈干净的边界，两者不冲突。
+      `border:1px solid var(--dsw-alias-border-l1);`,
       `box-shadow:var(--dsw-elevation-soft,0 8px 28px rgb(0 0 0 / 16%));`,
       `animation:dsp-pc-tip-in 240ms ease-out}`,
       // 外环改用 **SVG** 画，不用 conic-gradient。
@@ -364,7 +367,14 @@ window.__ModuleLoader__.load({
       // r=85.5、stroke-width=9 → 环占 r 81~90；内盘 r=81（162px），两者正好接上。
       `.${CLASS.tipRing}{position:absolute;inset:0;width:180px;height:180px;display:block;pointer-events:none}`,
       // 内盘：与圆盘的 `.dsp-pc-ring-inner` 同一套（不透明两段实色），只是里面多了那句文案。
-      `.${CLASS.tipInner}{width:162px;height:162px;border-radius:50%;display:flex;flex-direction:column;`,
+      // 内盘 164px（r=82）而不是 162px（r=81）：**故意往环底下压 1px**。
+      // SVG 环的内缘与内盘的外缘如果正好相接，两条抗锯齿边会叠出一道极淡的亮缝，
+      // 看上去像"环和内盘之间有个缝"。压 1px 之后这条缝被内盘盖住。
+      // 环因此显窄 1px（9 → 8 可见），肉眼无感。
+      // `position:relative` 不是为了定位，是**绘制顺序**：SVG 是绝对定位元素，绝对定位
+      // 会盖在静态元素之上。内盘不加定位就压不住环的内缘，"往环底下压 1px"那招会失效。
+      // 加上之后内盘进入定位层，DOM 里又排在 SVG 之后，于是正常盖在环上。
+      `.${CLASS.tipInner}{position:relative;width:164px;height:164px;border-radius:50%;display:flex;flex-direction:column;`,
       `align-items:center;justify-content:center;text-align:center;`,
       `background:conic-gradient(var(--dsp-pc-dial,var(--dsw-alias-bg-overlay)) var(--dsp-pc-progress,0%),var(--dsp-pc-dial-rest,var(--dsw-alias-bg-overlay)) 0)}`,
       `.${CLASS.tipTime}{font-size:40px;line-height:1;font-weight:600;color:var(--dsw-alias-label-primary);`,
