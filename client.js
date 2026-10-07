@@ -383,7 +383,11 @@ window.__ModuleLoader__.load({
       // `position:relative` 不是为了定位，是**绘制顺序**：SVG 是绝对定位元素，绝对定位
       // 会盖在静态元素之上。内盘不加定位就压不住环的内缘，"往环底下压 1px"那招会失效。
       // 加上之后内盘进入定位层，DOM 里又排在 SVG 之后，于是正常盖在环上。
-      `.${CLASS.tipInner}{position:relative;width:164px;height:164px;border-radius:50%;display:flex;flex-direction:column;`,
+      // `clip-path:circle(50%)` 与 `border-radius:50%` 两个都写，是刻意的冗余：
+      // 实测"环有的地方宽 9px、四个角几乎没有宽度" = 环宽**不均匀**，这是形状问题 ——
+      // 说明内盘渲染成了**正方形**（正方形的角指向四个斜角，正好把环在那里整条盖掉，
+      // 只剩正上正下正左正右露出 9px）。`clip-path` 不依赖 `border-radius`，能强制成圆。
+      `.${CLASS.tipInner}{position:relative;width:164px;height:164px;border-radius:50%;clip-path:circle(50%);display:flex;flex-direction:column;`,
       `align-items:center;justify-content:center;text-align:center;`,
       `background:conic-gradient(var(--dsp-pc-dial,var(--dsw-alias-bg-overlay)) var(--dsp-pc-progress,0%),var(--dsp-pc-dial-rest,var(--dsw-alias-bg-overlay)) 0)}`,
       `.${CLASS.tipTime}{font-size:40px;line-height:1;font-weight:600;color:var(--dsw-alias-label-primary);`,
