@@ -3,8 +3,8 @@
  *
  * 时钟本身完全跑在浏览器入口（`./client`）里：倒计时、它的设置、它的持久化，以及它挂进整帧
  * `shell.overlay` 层的悬浮控件。宿主半只负责休息气泡需要的那一块：`apply` 注册无状态的只读
- * 路由 `/pomodoro/tip`，客户端在休息开始时拉一次（`client.js` 里 BreakTip 那个 effect），
- * 拿到的句子替换气泡里的默认句。所有失败路径都回 204，气泡保留默认句。
+ * 路由 `/pomodoro/tip`，客户端在休息开始时拉一次（effect 在 `client.js` 的 `PomodoroClock` 里，
+ * 它渲染的 `BreakTip` 是没有 effect 的展示组件）。所有失败路径都回 204，气泡保留默认句。
  * **对外 204 与「插件坏了」完全同形**，所以失败时 handler 会往宿主日志写一行短码（见
  * logTipFailure）：既包括生成失败，也包括 handler 自己在 resolveTip 之外抛出的未预料异常。
  * 排查「AI 句一直不出现」先看那一行，别先怀疑路由没注册。
