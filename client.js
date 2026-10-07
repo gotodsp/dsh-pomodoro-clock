@@ -223,13 +223,24 @@ window.__ModuleLoader__.load({
       // 圆盘按阶段换色：这一条只做「阶段 → token」的映射，具体色值由下面的
       // 浅色/深色两条规则提供。映射和色值分开写，是为了让深色规则只覆盖原始
       // 色值、不去碰映射变量（原因见深色那条的注释）。
-      `.${CLASS.root}{box-sizing:border-box;${paletteDecls('light')};--dsp-pc-ring:var(--dsp-pc-ring-focus);--dsp-pc-ring-soft:var(--dsp-pc-ring-focus-soft);--dsp-pc-dial:var(--dsp-pc-dial-focus);--dsp-pc-dial-rest:var(--dsp-pc-dial-focus-rest)}`,
+      //
+      // **调色板必须同时发给气泡**（`.dsp-pc-tip`）：气泡是时钟根节点的**兄弟**，
+      // 兄弟之间不继承自定义属性。只发给根节点时，气泡里的
+      // `--dsp-pc-ring: var(--dsp-pc-ring-short)` 会因为 `--dsp-pc-ring-short` **不存在**
+      // 而变成无效值，于是 `var(--dsp-pc-ring, 兜底)` 取兜底 —— 外环渲染成错误红。
+      // 更隐蔽的是：`--dsp-pc-ring` 与 `--dsp-pc-ring-soft` 会**同时**失效、落到同一个
+      // 兜底色，于是"已经扫过的扇形"整个消失，看上去只是一圈纯色 —— 用户实测报告就是
+      // "外环是红色、和圆盘不一致、没有扫过的扇形"，三个现象同一个原因。
+      `.${CLASS.root},.${CLASS.tip}{box-sizing:border-box;${paletteDecls('light')}}`,
+      // 阶段映射：根节点与气泡各来一条（内联样式也会写同样的值，见 TIP_PHASE_VARS）。
+      // 默认阶段（没有 data-phase 时）：映射到 focus 的色值。有 data-phase 时由下面的规则覆盖。
+      `.${CLASS.root}{--dsp-pc-ring:var(--dsp-pc-ring-focus);--dsp-pc-ring-soft:var(--dsp-pc-ring-focus-soft);--dsp-pc-dial:var(--dsp-pc-dial-focus);--dsp-pc-dial-rest:var(--dsp-pc-dial-focus-rest)}`,
       // 深色：**只覆盖原始色值，绝不重新声明 --dsp-pc-ring / --dsp-pc-dial**。
       // 这条选择器是 (0,2,1)，而阶段规则 `.dsp-pc-root[data-phase=…]` 是 (0,2,0)
       // —— 一旦在这里也写映射变量，深色下阶段就会被永久钉死在 focus。
       // `body[data-ds-dark-theme]` 是宿主 layout presenter 维护的暗色属性，
       // 宿主自己的主题 CSS 用的也是它。
-      `body[data-ds-dark-theme] .${CLASS.root}{${paletteDecls('dark')}}`,
+      `body[data-ds-dark-theme] .${CLASS.root},body[data-ds-dark-theme] .${CLASS.tip}{${paletteDecls('dark')}}`,
       // 阶段变量必须**同时**发给气泡：气泡和时钟根节点是**兄弟**（都直接挂在整帧浮层里），
       // 兄弟之间不继承自定义属性。早先只写给 `.dsp-pc-root`，于是气泡里 `var(--dsp-pc-ring, …)`
       // 每次都落到兜底值 —— 三个阶段全渲染成同一个颜色，且完全静默。
