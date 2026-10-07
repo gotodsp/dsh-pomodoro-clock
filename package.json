@@ -6,7 +6,7 @@
   "type": "module",
   "icon": "./icon.svg",
   "scripts": {
-    "test": "node test/model.test.mjs"
+    "test": "node test/model.test.mjs && node test/tip.test.mjs"
   },
   "exports": {
     ".": "./index.js",
