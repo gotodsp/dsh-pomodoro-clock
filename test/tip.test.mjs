@@ -483,10 +483,14 @@ group('生成编排 resolveTip：注入假 llm，覆盖全部失败路径')
   check(true, 'deps.signal 与内部超时合并（AbortSignal.any）：传给模型的不是外部 signal 本身，且随外部 abort',
     `同一对象 ${seen.signal === acAny.signal}，abort 前 ${abortedBefore} → abort 后 ${seen.signal.aborted}`)
 
-  // 请求体的形状：provider / model / system / messages / maxTokens=60 / signal 齐全，
-  // 且**不得**出现 reasoningEffort 与 purpose（后者只接受 compaction / session-title）。
+  // 请求体的形状：provider / model / system / messages / reasoningEffort / maxTokens=60 / signal 齐全，
+  // 且**不得**出现 purpose（该字段只接受 compaction / session-title，没有给插件留位置）。
   // messages 里的 content 是 ContentBlock[]（真实 llm 服务的请求消息按块数组解析），
   // 只带一个 text 块，内容正是 buildTipPrompt 的 user 串（发给模型的只有状态数字与角度）。
+  //
+  // reasoningEffort: 'off' 是修复轮 4 加的，**这条断言就是当时的 bug**：修复前这里断言的是
+  // 「请求里没有 reasoningEffort」，理由是「不传就是让适配器用自己的默认、不抬推理」。实机证伪了
+  // 这个理由——不传 = 走适配器默认 = high 档。见下面「关掉推理」那一段。
   const prompt = buildTipPrompt(input)
   let opts = null
   const spyOpts = {
@@ -500,12 +504,91 @@ group('生成编排 resolveTip：注入假 llm，覆盖全部失败路径')
   assert.equal(opts.model, 'm')
   assert.equal(opts.system, prompt.system)
   assert.deepEqual(opts.messages, [{ role: 'user', content: [{ type: 'text', text: prompt.user }] }])
+  assert.equal(opts.reasoningEffort, 'off')
   assert.equal(opts.maxTokens, 60)
   assert.ok(opts.signal instanceof AbortSignal)
-  assert.equal('reasoningEffort' in opts, false)
   assert.equal('purpose' in opts, false)
-  check(true, '请求体：provider/model/system/messages/maxTokens=60/signal 齐全，无 reasoningEffort、无 purpose',
-    'maxTokens 60，content 为 ContentBlock[]')
+  check(true, '请求体：provider/model/system/messages/reasoningEffort=off/maxTokens=60/signal 齐全，无 purpose',
+    'maxTokens 60，reasoningEffort off，content 为 ContentBlock[]')
+
+  // ---- 关掉推理（修复轮 4）----
+  //
+  // 实机（宿主进程里抓到的原始 chunk）证明：请求里不带 reasoningEffort 时，模型先把 60 token 的
+  // maxTokens 全花在 reasoning-delta 上（内容是把 system 复述一遍），再以 finish{kind:'max-tokens'}
+  // 收尾，**一个 text-delta 都没有** → 204。60 token 的预算与 high 档的推理互斥，所以必须显式关掉。
+  // 上面那条断言钉住「带上了 off」；下面钉住它带来的两个后果：重试的条件与上限。
+
+  // 第一次以 error 收尾（当前 provider 不认这个档：能力校验跑在派发之前，不发真实请求）→
+  // 去掉该字段重试一次。第二次的请求体除 reasoningEffort 外逐字段与第一次相同，结果照常过校验。
+  const attempts = []
+  const retryLlm = {
+    stream: (o) => {
+      attempts.push(o)
+      return attempts.length === 1
+        ? (async function* () {
+            yield { type: 'finish', reason: { kind: 'error', failure: { message: 'unsupported effort', code: 'UNSUPPORTED_REASONING_EFFORT' } } }
+          })()
+        : (async function* () { for (const c of textChunks('去接一杯水吧')) yield c })()
+    },
+  }
+  const retried = await resolveTip(deps(retryLlm), input)
+  assert.equal(retried, '去接一杯水吧')
+  assert.equal(attempts.length, 2)
+  assert.equal(attempts[0].reasoningEffort, 'off')
+  assert.equal('reasoningEffort' in attempts[1], false)
+  const { reasoningEffort: droppedEffort, ...firstWithoutEffort } = attempts[0]
+  assert.deepEqual(attempts[1], firstWithoutEffort)
+  assert.equal(droppedEffort, 'off')
+  check(true, '适配器以 error 收尾（不认 reasoningEffort）→ 去掉该字段重试一次，其余字段逐字相同',
+    `两次调用，第二次无 reasoningEffort，结果 ${JSON.stringify(retried)}`)
+
+  // 重试有上限：两次都 error 就到此为止，且采纳标准一点没松——第二次也必须 stop 才算数
+  let bothCalls = 0
+  const alwaysError = {
+    stream: () => {
+      bothCalls += 1
+      return (async function* () {
+        yield { type: 'finish', reason: { kind: 'error', failure: { message: 'x', code: 'BOOM' } } }
+      })()
+    },
+  }
+  assert.equal(await resolveTip(deps(alwaysError), input), null)
+  assert.equal(bothCalls, 2)
+  check(true, '两次都以 error 收尾 → null，且只发两次调用（重试有上限，不无限重试）',
+    `stream 被调用 ${bothCalls} 次`)
+
+  // max-tokens / aborted 不触发重试：去掉 reasoningEffort 只会让推理回来（更糟），取消则重试无意义
+  for (const kind of ['max-tokens', 'aborted']) {
+    let calls = 0
+    const oneKind = {
+      stream: () => {
+        calls += 1
+        return (async function* () { yield { type: 'finish', reason: { kind } } })()
+      },
+    }
+    assert.equal(await resolveTip(deps(oneKind), input), null)
+    assert.equal(calls, 1)
+  }
+  check(true, 'max-tokens / aborted 不触发重试（各只发一次调用）', 'max-tokens / aborted')
+
+  // onFailure：回退默认句时把「为什么」交给宿主日志（HTTP 上 204 与「插件坏了」同形，
+  // 这一行短码是唯一的区分手段）。它必须覆盖每一条失败出口，且自己抛错不影响结论。
+  const reasons = []
+  const noting = (llm, extra = {}) => deps(llm, { onFailure: (r) => reasons.push(r), ...extra })
+  assert.equal(await resolveTip(noting(undefined), input), null) // llm 缺席
+  assert.equal(await resolveTip(noting(okLlm(textChunks(''))), input), null) // 校验不过
+  assert.equal(await resolveTip(noting(okLlm([])), input), null) // 没有终止块
+  const acReason = new AbortController()
+  acReason.abort()
+  assert.equal(await resolveTip(noting(okLlm(textChunks('去接一杯水吧')), { signal: acReason.signal }), input), null)
+  assert.deepEqual(reasons, ['no-llm', 'rejected:0cp/0han', 'no-finish', 'client-abort'])
+  reasons.length = 0
+  assert.equal(await resolveTip(noting(alwaysError), input), null)
+  // 重试的两次尝试**只记最后那一条**：一次请求一行日志，不是一次尝试一行
+  assert.deepEqual(reasons, ['error:BOOM'])
+  assert.equal(await resolveTip(noting(okLlm([]), { onFailure: () => { throw new Error('log broken') } }), input), null)
+  check(true, 'onFailure 覆盖每条失败出口（短码含适配器失败码），钩子抛错也不影响返回 null',
+    reasons.concat('log broken → 仍 null').join(' / '))
 }
 
 // ------------------------------------------------------------ 同源检查（Task 4）

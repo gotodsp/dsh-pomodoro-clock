@@ -4,6 +4,8 @@
  * 时钟本身完全跑在浏览器入口（`./client`）里：倒计时、它的设置、它的持久化，以及它挂进整帧
  * `shell.overlay` 层的悬浮控件。宿主半只负责休息气泡需要的那一块：`apply` 注册无状态的只读
  * 路由 `/pomodoro/tip`，客户端在休息开始时拉一次。所有失败路径都回 204，气泡保留默认句。
+ * **对外 204 与「插件坏了」完全同形**，所以生成失败时 handler 会往宿主日志写一行短码
+ * （见 logTipFailure）——排查「AI 句一直不出现」先看那一行，别先怀疑路由没注册。
  *
  * 本模块**每个宿主进程只求值一次**（Node 的 ESM 按解析后的 URL 缓存模块）。DSH 的 HMR 在本
  * profile 里 `root: []`，即不监听模块文件；插件管理器的 disable/enable（以及 bundle 的开关）
@@ -235,18 +237,117 @@ export function validateTip(text, lang) {
 /** 单次生成的内部超时（毫秒）。慢响应宁可回退默认句，也不让 HTTP 请求挂着。 */
 const TIP_TIMEOUT_MS = 3000
 
-/** 单次生成的输出预算（token）。正文就一句话，60 足够，同时封住最坏成本。 */
+/** 单次生成的输出预算（token）。正文就一句话，60 足够，同时封住最坏成本。
+ *  **这个预算只在模型不把 token 花在思考上时才成立**——见下面的 TIP_REASONING_EFFORT。 */
 const TIP_MAX_TOKENS = 60
+
+/** 生成时关掉推理（适配器侧就是 thinking: disabled）。
+ *
+ *  不传这个字段**不等于**「不抬推理」：不传就是走适配器默认，而本机默认档是 high。实机抓到的
+ *  原始 chunk（deepseek-account / deepseek-flash）：模型先吐满整整 60 个 token 的 reasoning-delta
+ *  ——把 maxTokens 全部吃掉，内容还是把 system 复述了一遍——随后以 finish{kind:'max-tokens'}
+ *  收尾，**一个 text-delta 都没有**；请求 1.2s 返回 204，从外面看和「插件坏了」完全同形。
+ *  60 token 的预算与 high 档的推理是互斥的，而写一句 12–20 字的提醒不需要推理：
+ *  llm-deepseek 给 session-title 这类单行生成用的也是 off。
+ *
+ *  万一当前默认模型不认这个档：llm 服务的能力校验跑在**派发之前**，会以终止性
+ *  finish{kind:'error'} + failure.code = UNSUPPORTED_REASONING_EFFORT 结束，不发真实请求；
+ *  resolveTip 据此去掉该字段重试一次（见那里），别让「换了个不支持推理的默认模型」变成永久 204。 */
+const TIP_REASONING_EFFORT = 'off'
+
+/**
+ * 把「为什么回退默认句」这一个短码交给调用方的日志钩子。纯逻辑不依赖它：钩子缺席、抛错都无影响。
+ * 只传短码与数字，**不传模型正文**——生成内容不进宿主日志。
+ * @param {object} deps resolveTip 的依赖对象
+ * @param {string} reason 短码，如 'timeout' / 'error:ACCOUNT_SIGN_IN_REQUIRED'
+ */
+function reportTipFailure(deps, reason) {
+  try {
+    deps?.onFailure?.(reason)
+  } catch {
+    // 日志钩子自己坏了不影响生成本身的结论
+  }
+}
+
+/**
+ * 跑一次生成尝试：建流并消费到终止块（或流结束），返回这次尝试的结局。**不抛。**
+ * 与 llm 服务的协议：每次调用都以一个终止 `finish` 块收尾；`llm.stream()` 与流的迭代都可能抛错，
+ * 两条都收敛成「失败」，异常不外泄。
+ * @param {{ stream(o: object): AsyncIterable<object> }} llm llm 服务
+ * @param {object} request 请求体（provider/model/system/messages/reasoningEffort/maxTokens/signal）
+ * @param {AbortSignal | undefined} clientSignal 调用方的 signal（路由在客户端断开时 abort 它）
+ * @param {AbortSignal} signal 合并后的 signal（外部取消 + 内部超时），判断取消原因用
+ * @returns {Promise<{ text: string, stopped: boolean, errorCode?: string, reason: string }>}
+ *   stopped 只表示「以 finish{kind:'stop'} 干净收尾」，text 才可采纳；
+ *   errorCode 只在适配器以终止性 finish{kind:'error'} 失败时出现（调用方据此决定要不要重试）；
+ *   reason 是给宿主日志的短码，同时也是这条路径的失败分类。
+ */
+async function runTipAttempt(llm, request, clientSignal, signal) {
+  let stream
+  try {
+    stream = llm.stream(request)
+  } catch {
+    // 适配器在派发前同步抛错
+    return { text: '', stopped: false, reason: 'stream-threw' }
+  }
+
+  let text = ''
+  let stopped = false
+  try {
+    for await (const chunk of stream) {
+      // 用户切走 / 超时：已攒的内容一律丢弃，这句话已经没人要了。
+      // 两者共用同一个合并 signal，靠 clientSignal 区分是哪一种（写进日志的原因不同）。
+      if (signal.aborted) {
+        return { text: '', stopped: false, reason: clientSignal?.aborted ? 'client-abort' : 'timeout' }
+      }
+      // 只认 text-delta：reasoning-delta 是模型的思考过程，绝不能进气泡。
+      if (chunk?.type === 'text-delta') {
+        // text 不是字符串说明流本身坏了，攒出来的句子不可信 —— 宁可回退（sanitizeTip 对
+        // 非字符串会显式抛错，不能让它把异常泄到调用方）。
+        if (typeof chunk.text !== 'string') return { text: '', stopped: false, reason: 'bad-delta' }
+        text += chunk.text
+        continue
+      }
+      // 终止块：只有干净收尾（stop）才采纳已攒正文。error / aborted / max-tokens /
+      // tool-calls 都意味着内容失败或被截断，正文必须整个丢掉。
+      if (chunk?.type === 'finish') {
+        const kind = chunk.reason?.kind
+        if (kind === 'stop') {
+          stopped = true
+          // 与旧行为一致：终止块之后继续把流读完，最后再看 stopped。
+          continue
+        }
+        // 适配器的失败码（dsh-llm 的 adapterFailureChunk 一定带 failure.code）。
+        const code = typeof chunk.reason?.failure?.code === 'string' ? chunk.reason.failure.code : undefined
+        return {
+          text,
+          stopped: false,
+          ...kind === 'error' ? { errorCode: code ?? 'error' } : {},
+          reason: code === undefined ? `finish:${kind ?? 'none'}` : `${String(kind)}:${code}`,
+        }
+      }
+    }
+  } catch {
+    // 迭代中抛错（网络断等）：异常不外泄
+    return { text: '', stopped: false, reason: 'iteration-threw' }
+  }
+
+  // 一次调用没有终止块 = 流被截断（适配器约定每次调用都以 finish 收尾），不采纳。
+  if (!stopped) return { text, stopped: false, reason: 'no-finish' }
+  return { text, stopped: true, reason: 'stop' }
+}
 
 /**
  * 生成一句休息提醒。
  *
- * 失败矩阵（七条路径全部返回 null，任何一条都不抛）：服务缺席、模型抛错、空响应、
- * 校验不过（太短/太长/客套长句）、终止原因非 stop、外部取消、内部超时。
- * @param {{ llm?: { stream(o: object): AsyncIterable<object> }, provider: string, model: string, signal?: AbortSignal }} deps
+ * 失败矩阵（全部返回 null，任何一条都不抛）：服务缺席、模型抛错、空响应、校验不过
+ * （太短/太长/客套长句）、终止原因非 stop、外部取消、内部超时。
+ * 「适配器以 error 收尾」这一条会去掉 reasoningEffort 再试一次（见下），两次都失败仍返回 null。
+ * @param {{ llm?: { stream(o: object): AsyncIterable<object> }, provider: string, model: string, signal?: AbortSignal, onFailure?: (reason: string) => void }} deps
  *   llm 是宿主上下文里的 llm 服务（`ctx.get('llm')`），缺席即第一道降级；
  *   provider / model 由调用方按用户当前选择传入，本函数不硬编码；
- *   signal 是外部取消（路由在客户端断开时 abort 它）。
+ *   signal 是外部取消（路由在客户端断开时 abort 它）；
+ *   onFailure 可选：回退默认句时回调一个短码，宿主路由拿它写日志（HTTP 上 204 与「插件坏了」同形）。
  * @param {{ phase: 'short'|'long', round: number, done: number, now: string, angle: string, lang: 'zh'|'en' }} input
  *   与 buildTipPrompt 同形的状态输入，lang 同时决定校验用哪套长度界。
  * @returns {Promise<string | null>} 清洗 + 校验通过的一句话，或 null。
@@ -254,61 +355,65 @@ const TIP_MAX_TOKENS = 60
 export async function resolveTip(deps, input) {
   const llm = deps?.llm
   // 第一道降级：服务缺席时连超时都不建，直接回退（早于任何 I/O）。
-  if (llm === undefined || llm === null) return null
+  if (llm === undefined || llm === null) {
+    reportTipFailure(deps, 'no-llm')
+    return null
+  }
 
   try {
     // 外部 signal 与内部超时必须**合并**：只取外部会让慢响应挂住请求；只取内部会让用户
     // 切走后模型调用继续跑并计费。deps.signal 缺席时退化为只用自己的超时。
     // （放进 try 里：传进来的 signal 若不是真的 AbortSignal，AbortSignal.any 会抛错，
     //   这里同样按「回退默认句」处理，不外泄。）
+    // 两次尝试共用这一个 signal：3 秒的内部期限覆盖**整次生成**，重试不会把它翻倍。
     const signal = deps.signal
       ? AbortSignal.any([deps.signal, AbortSignal.timeout(TIP_TIMEOUT_MS)])
       : AbortSignal.timeout(TIP_TIMEOUT_MS)
-    if (signal.aborted) return null
+    if (signal.aborted) {
+      reportTipFailure(deps, deps.signal?.aborted ? 'client-abort' : 'timeout')
+      return null
+    }
 
     const { system, user } = buildTipPrompt(input)
-    let text = ''
-    let finished = false
-
-    // 不传 reasoningEffort（让适配器用自己的默认，本机默认档很高，写一句话不该抬推理），
     // 不传 purpose（该字段只接受 compaction / session-title，没有给插件留位置）。
-    const stream = llm.stream({
+    const requestWith = (reasoningEffort) => ({
       provider: deps.provider,
       model: deps.model,
       system,
       messages: [{ role: 'user', content: [{ type: 'text', text: user }] }],
+      ...reasoningEffort === undefined ? {} : { reasoningEffort },
       maxTokens: TIP_MAX_TOKENS,
       signal,
     })
 
-    for await (const chunk of stream) {
-      // 用户切走 / 超时：已攒的内容一律丢弃，这句话已经没人要了。
-      if (signal.aborted) return null
-      // 只认 text-delta：reasoning-delta 是模型的思考过程，绝不能进气泡。
-      if (chunk?.type === 'text-delta') {
-        // text 不是字符串说明流本身坏了，攒出来的句子不可信 —— 宁可回退（sanitizeTip 对
-        // 非字符串会显式抛错，不能让它把异常泄到调用方）。
-        if (typeof chunk.text !== 'string') return null
-        text += chunk.text
-        continue
-      }
-      // 终止块：只有干净收尾（stop）才采纳已攒正文。error / aborted / max-tokens /
-      // tool-calls 都意味着内容失败或被截断，正文必须整个丢掉。
-      if (chunk?.type === 'finish') {
-        if (chunk.reason?.kind !== 'stop') return null
-        finished = true
-      }
+    let attempt = await runTipAttempt(llm, requestWith(TIP_REASONING_EFFORT), deps.signal, signal)
+
+    // 第一次以终止性 error 失败时，去掉 reasoningEffort 再试一次：这个字段是**我们**加的，
+    // 而 provider 不认它（能力校验失败，没发真实请求）会让整条路径永久 204。重试只是换一份
+    // 请求体，**采纳标准一点没松**——第二次同样必须拿到 finish{kind:'stop'} 才返回正文。
+    // 三种情况不重试：已经拿到干净收尾、signal 已 abort（重试必然也失败）、失败不是 error
+    // （max-tokens / 没有终止块等，去掉字段只会让推理回来、更糟）。
+    if (attempt.errorCode !== undefined && !signal.aborted) {
+      attempt = await runTipAttempt(llm, requestWith(undefined), deps.signal, signal)
     }
 
-    // 一次调用没有终止块 = 流被截断（适配器约定每次调用都以 finish 收尾），不采纳。
-    if (!finished) return null
+    if (!attempt.stopped) {
+      reportTipFailure(deps, attempt.reason)
+      return null
+    }
 
     // 清洗负责救回引号/换行/客套，校验只回答「能不能进气泡」。清得干净不等于可用。
-    const clean = sanitizeTip(text)
-    return validateTip(clean, input.lang) ? clean : null
+    const clean = sanitizeTip(attempt.text)
+    if (!validateTip(clean, input.lang)) {
+      // 带上码点数与汉字数：长度界的两个方向（太短 / 太长）一眼可辨（界是 6–24 汉字且 ≤30 码点）
+      reportTipFailure(deps, `rejected:${[...clean].length}cp/${countHan(clean)}han`)
+      return null
+    }
+    return clean
   } catch {
     // 任何异常（含 sanitizeTip 对非字符串的显式抛错、buildTipPrompt 收到坏 input）
     // 都不外泄：调用方只认 null。
+    reportTipFailure(deps, 'threw')
     return null
   }
 }
@@ -355,6 +460,38 @@ export function isSameOrigin(origin, host) {
 function noContent(res) {
   res.writeHead(204, { 'cache-control': 'no-store' })
   res.end()
+}
+
+/**
+ * 把「为什么这次没有 AI 句」写成一行宿主日志。
+ *
+ * 这条路由对外只有两种可见结果：200 带正文，或 204 空体。**生成失败与插件坏掉在 HTTP 上完全同形**
+ * （都是 204），所以失败必须留一行痕，否则「AI 句一直不出现」无从查起。
+ * 只记短码，不记模型正文（日志不落用户内容）；只在**输入合法、但句子没生成出来**时记——
+ * 跨站 Origin 与非法 query 是客户端自己的问题，不记。
+ *
+ * 两个出口都写，因为**它们各自都可能是空的**（2026-10-07 实机分别验过）：
+ *   - `ctx.logger.warn`：DSH 自己的约定（dsh-host-webserver 的 handler 出错时也这么记）。
+ *     实机确认该服务存在、`warn` 是可调用的函数、调用成功——但 **web profile 里没有任何
+ *     exporter**（cordis 的 Logger 只把消息发给注册过的 exporter），所以消息哪儿都不出现。
+ *   - `console.warn`：同一次实验里它直接出现在宿主进程的输出里，所以它是本 profile 唯一
+ *     有落点的通道；宿主（含桌面端）把它接到哪里由启动方式决定。
+ * 两个都写 → 「回退有痕」这件事不依赖 profile 的日志配置。各自独立 try，任一坏掉都不影响响应。
+ * @param {object} ctx 插件上下文
+ * @param {string} reason 短码
+ */
+function logTipFailure(ctx, reason) {
+  const message = `pomodoro: 休息提醒生成失败，本次回退默认句（${reason}）`
+  try {
+    ctx?.logger?.warn?.(message)
+  } catch {
+    // 日志失败不影响响应
+  }
+  try {
+    console.warn(message)
+  } catch {
+    // 同上
+  }
 }
 
 /** 本地时间的 HH:MM（补零）。时间由 handler 取，buildTipPrompt 保持纯函数、可测。 */
@@ -409,6 +546,9 @@ async function handleTip(ctx, req, res) {
     const llm = ctx.get('llm')
     const selection = ctx.get('agentDefaultModel')?.currentSelection()
     if (llm === undefined || llm === null || selection === undefined || selection === null) {
+      // 这一条是实机最可能的静默失败（profile 没配默认模型时，每次休息都静默回退默认句），
+      // 所以在服务这一层就记一行，别等到 204 出去以后无从查起。
+      logTipFailure(ctx, `no-service:${llm === undefined || llm === null ? 'llm' : 'agentDefaultModel'}`)
       noContent(res)
       return
     }
@@ -420,7 +560,14 @@ async function handleTip(ctx, req, res) {
     req.on('close', () => controller.abort())
 
     const text = await resolveTip(
-      { llm, provider: selection.provider, model: selection.model, signal: controller.signal },
+      {
+        llm,
+        provider: selection.provider,
+        model: selection.model,
+        signal: controller.signal,
+        // 失败原因写进宿主日志：没有它，204 与「插件坏了」无法区分（见 logTipFailure）。
+        onFailure: (reason) => logTipFailure(ctx, reason),
+      },
       {
         phase: params.get('phase'),
         round,
