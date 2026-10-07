@@ -4,6 +4,13 @@
  * 时钟本身完全跑在浏览器入口（`./client`）里：倒计时、它的设置、它的持久化，以及它挂进整帧
  * `shell.overlay` 层的悬浮控件。宿主半只负责休息气泡需要的那一块：`apply` 注册无状态的只读
  * 路由 `/pomodoro/tip`，客户端在休息开始时拉一次。所有失败路径都回 204，气泡保留默认句。
+ *
+ * 本模块**每个宿主进程只求值一次**（Node 的 ESM 按解析后的 URL 缓存模块）。DSH 的 HMR 在本
+ * profile 里 `root: []`，即不监听模块文件；插件管理器的 disable/enable（以及 bundle 的开关）
+ * 只是重新组合 loader entry，`Entry.init()` 的 import 命中缓存、不会重新求值本文件。所以改完
+ * 宿主半**必须重启宿主进程**，否则跑的还是旧模块——症状很隐蔽：entry 是 `active`、没有任何报错，
+ * 而 `/pomodoro/tip` 一直 404（旧版 host half 的 `apply` 是空函数）。这条不是推测：在插件的
+ * disable→enable 之间往本文件加一条模块级副作用，副作用没有触发、路由依旧 404（见 Task 4 修复报告）。
  */
 export function apply(ctx) {
   // 用 ctx.inject 等 webServer 到位，而不是在这里 ctx.get 一次：加载器把同一层的 entry **并发**激活

@@ -1,8 +1,11 @@
-# Floating Pomodoro clock over the shipped Web composition, which carries no
-# such row. The Host half is intentionally empty: the whole clock lives in the
-# browser entry, which mounts itself into the frame-wide `shell.overlay` layer.
-# The row exists so the plugin is addressable, listed, and toggleable in the
-# profile like any other bundle.
+# 番茄钟悬浮时钟铺在出厂 Web 组合之上，那个组合里没有这一行。
+# 宿主半现在不空了：`apply` 注册休息提醒用的只读路由 `/pomodoro/tip`（浏览器入口 `./client`
+# 在休息开始时拉一次，失败一律 204）。时钟本体仍在浏览器入口，它自己挂进整帧的
+# `shell.overlay` 层。这一行的作用是让插件在 profile 里可寻址、可列出、可开关。
+#
+# 改宿主半（index.js）之后**必须重启宿主进程**：Node 按解析后的 URL 缓存 ESM 模块，而 DSH 的
+# HMR 在本 profile 里 root 为空、不监听模块文件；插件管理器的 disable/enable 只重挂 loader
+# entry，不会重新 import。不重启的症状很隐蔽——entry 是 active、没有报错，路由却一直 404。
 
 - insert:
     - id: pomodoro-clock
