@@ -23,9 +23,11 @@ const TIP_SYSTEM_ZH = '你是休息提醒助手。'
   + '只输出一句提醒，字数严格控制在 12 到 20 个汉字之间，不加任何解释或前后缀。'
   + '不要用引号，不要用 emoji，不要说教，不要用「好的」「建议你」这类客套开头。'
 
+// 英文的长度单位必须是「词」而不是「字符」：校验器（后续任务）按 3–12 词判，
+// prompt 里若写 characters，按 prompt 生成的句子会被自己的校验器拒掉，英文路径永远回退默认句。
 const TIP_SYSTEM_EN = 'You are a break-reminder assistant. '
   + 'At this moment, output only this one reminder sentence, with no explanation and no framing text. '
-  + 'Keep it between 12 and 20 characters, use no quotation marks, no emoji, no lecturing, '
+  + 'Keep it between 3 and 12 words, use no quotation marks, no emoji, no lecturing, '
   + 'and no polite opener such as "Sure" or "I suggest".'
 
 // 角度 → 子句：中英各一张表，键必须是 TIP_ANGLES 里的 id。
@@ -47,13 +49,14 @@ const TIP_CLAUSE_EN = {
 
 /**
  * 构造一次提醒句生成的 prompt。
- * @param {{ phase: 'short'|'long', round: number, done: number, angle: string, lang: 'zh'|'en' }} input
+ * @param {{ phase: 'short'|'long', round: number, done: number, now: string, angle: string, lang: 'zh'|'en' }} input
  *   phase 当前休息阶段；round 本轮第几个番茄；done 今天已完成几个；
+ *   now 调用方算好的本地时间短串（如 '15:20'）——本函数不取时间，保持纯、可测；
  *   angle 本次角度（未知取值回退 TIP_ANGLES[0]）；lang 界面语言。
  * @returns {{ system: string, user: string }} 只有 lang 为 'en' 时取英文模板，其余（含缺陷值）按中文。
  */
 export function buildTipPrompt(input) {
-  const { phase, round, done, angle, lang } = input
+  const { phase, round, done, now, angle, lang } = input
   // 未知角度（客户端版本更新、query 被手改）不能抛：退回第一个角度，最坏只是轮换少一档。
   const safeAngle = TIP_ANGLES.includes(angle) ? angle : TIP_ANGLES[0]
   const safeRound = Number.isFinite(round) ? round : 1
@@ -63,7 +66,8 @@ export function buildTipPrompt(input) {
     const phaseText = phase === 'long' ? 'long break' : 'short break'
     return {
       system: TIP_SYSTEM_EN,
-      user: `State: ${phaseText}, pomodoro ${safeRound} of this cycle, ${safeDone} finished today.`
+      user: `State: ${phaseText}, pomodoro ${safeRound} of this cycle, ${safeDone} finished today,`
+        + ` current time ${now}.`
         + ` Angle for this tip: ${TIP_CLAUSE_EN[safeAngle]}. Write the tip in English.`,
     }
   }
@@ -71,7 +75,7 @@ export function buildTipPrompt(input) {
   const phaseText = phase === 'long' ? '长休息' : '短休息'
   return {
     system: TIP_SYSTEM_ZH,
-    user: `状态：${phaseText}，本轮第 ${safeRound} 个番茄，今天已完成 ${safeDone} 个。`
+    user: `状态：${phaseText}，本轮第 ${safeRound} 个番茄，今天已完成 ${safeDone} 个，当前时间 ${now}。`
       + `这句话的角度：${TIP_CLAUSE_ZH[safeAngle]}。用中文写这句话。`,
   }
 }
