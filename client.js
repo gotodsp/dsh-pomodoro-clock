@@ -156,7 +156,6 @@ window.__ModuleLoader__.load({
       btn: 'dsp-pc-btn',
       tip: 'dsp-pc-tip',
       tipClose: 'dsp-pc-tip-close',
-      tipInner: 'dsp-pc-tip-inner',
       tipTime: 'dsp-pc-tip-time',
       tipText: 'dsp-pc-tip-text',
       tipDot: 'dsp-pc-tip-dot',
@@ -339,25 +338,22 @@ window.__ModuleLoader__.load({
       // 就是现成的坐标系 —— 圆盘的默认位置用的也是它。
       // 垂直居中走 `translate` 而不是 `transform`：`transform` 要留给进出场动画的缩放，
       // 两者写在一起会互相覆盖（动画一跑，居中就没了）。
+      // **气泡就是圆盘本身**：外环用 `CLASS.ring`、内盘用 `CLASS.ringInner` —— 和角落那个
+      // 62px 圆盘**同一套 class、同一套 CSS**，这里只是把尺寸撑到 180px。不再另写一份
+      // conic-gradient：任何"照着圆盘再实现一遍"的写法都必然要同步两处，而圆盘是已经
+      // 验证过圆、验证过颜色对的元件 —— 复制它就没有我重新实现出错的空间。
       `.${CLASS.tip}{position:absolute;left:50%;top:50%;translate:-50% -50%;`,
-      `box-sizing:border-box;width:180px;height:180px;padding:9px;border-radius:50%;display:grid;place-items:center;`,
-      // `overflow:hidden` 是"看着不圆"的关键：`border-radius:50%` 只把自己的**背景**裁成圆，
-      // **管不住越界的子元素**。内盘是 162px 放在 160px 的内容盒里，会溢出 1px；而它是
-      // `position:relative`（定位元素），于是**方形地**探出圆外盖在环上 —— 圆就不圆了。
-      // 加上 `overflow:hidden`，子元素也被裁进圆里。
-      // 注意它**不会**裁掉元素自己的 `box-shadow`（投影画在盒子外），投影照常。
+      `box-sizing:border-box;width:180px;height:180px;border-radius:50%;display:grid;place-items:center;`,
+      // `overflow:hidden` 让子元素也一起被裁进圆里。`border-radius` 只裁自己的背景，
+      // **管不住越界的子元素**；环是 `position:absolute;inset:0`，正是靠这个才正好填满圆。
       `overflow:hidden;`,
-      `border:1px solid var(--dsw-alias-border-l1);`,
-      // 外环：与圆盘的 `.dsp-pc-ring` 同一套 conic-gradient，只是尺寸不同。
-      `background:conic-gradient(var(--dsp-pc-ring,var(--dsw-alias-state-error-primary)) var(--dsp-pc-progress,0%),var(--dsp-pc-ring-soft,var(--dsw-alias-state-error-primary)) 0);`,
       `box-shadow:var(--dsw-elevation-soft,0 8px 28px rgb(0 0 0 / 16%));`,
       `animation:dsp-pc-tip-in 240ms ease-out}`,
-      // 内盘：与圆盘的 `.dsp-pc-ring-inner` 同一套（不透明两段实色），只是里面多了那句文案。
-      // `clip-path:circle(50%)` 与 `border-radius:50%` 两个都写，是刻意的冗余：
-      // border-radius 只裁背景，clip-path 连子元素和溢出一并裁掉，任何情况下都是圆的。
-      `.${CLASS.tipInner}{width:162px;height:162px;border-radius:50%;clip-path:circle(50%);display:flex;flex-direction:column;`,
-      `align-items:center;justify-content:center;text-align:center;`,
-      `background:conic-gradient(var(--dsp-pc-dial,var(--dsw-alias-bg-overlay)) var(--dsp-pc-progress,0%),var(--dsp-pc-dial-rest,var(--dsw-alias-bg-overlay)) 0)}`,
+      // 圆盘的内盘是 50px、`display:grid`（配 62px 的环）；这里只改**尺寸与排版**，
+      // **颜色与画法沿用圆盘那条规则**：内盘与环的色值、conic-gradient 全部来自
+      // `.dsp-pc-ring` / `.dsp-pc-ring-inner`，一处都不用重写。
+      // 改 `display:flex` 是为了让"倒计时在上、文案在下"两行能按列排 —— 圆盘的 grid 只放一个读数。
+      `.${CLASS.tip} .${CLASS.ringInner}{display:flex;width:162px;height:162px;flex-direction:column;text-align:center}`,
       `.${CLASS.tipTime}{font-size:40px;line-height:1;font-weight:600;color:var(--dsw-alias-label-primary);`,
       `font-variant-numeric:tabular-nums;margin-bottom:9px}`,
       // 提醒句：换句时靠 React 的 key 换掉这个节点，这条动画随之重放（见 BreakTip）。
@@ -1334,17 +1330,20 @@ window.__ModuleLoader__.load({
         'aria-label': t('action.dismissTip'),
         title: t('action.dismissTip'),
       }, closeIcon()),
-      // 内盘：与圆盘同构，只在读数下面多接一句提醒。**不再显示阶段名** —— 圆盘本来就没有，
-      // 阶段由环的颜色表达；重复写一个名字正是"挤"和"不好看"的来源。
-      h('div', { className: CLASS.tipInner },
-        // 剩余时间与卡片/圆盘读同一个 snapshot，所以秒级 tick 照常刷新它。
-        h('div', { className: CLASS.tipTime, role: 'timer', 'aria-live': 'off' }, snap.text),
-        // key 换成句子就重挂这一行，CSS 的淡入随之重放：默认句 → AI 句是"换"而不是"跳"。
-        // sentence 为 null 时显示 i18n 的默认句 —— 中文不写死在逻辑里。
-        h('span', {
-          key: sentence ?? 'tip-fallback',
-          className: CLASS.tipText,
-        }, sentence ?? t('tip.fallback'))))
+      // **复制圆盘的元件**：外环 `CLASS.ring`、内盘 `CLASS.ringInner` —— 和角落那个 62px
+      // 圆盘用的是同一套 class，因此是同一套 CSS、同一套颜色、同一套画法。这里只把内盘
+      // 撑到 162px（见 CSS 的 `.dsp-pc-tip .dsp-pc-ring-inner`）并在里面多接一句提醒。
+      // 不再显示阶段名 —— 圆盘本来就没有，阶段由环的颜色表达。
+      h('span', { className: CLASS.ring },
+        h('span', { className: CLASS.ringInner },
+          // 剩余时间与卡片/圆盘读同一个 snapshot，所以秒级 tick 照常刷新它。
+          h('div', { className: CLASS.tipTime, role: 'timer', 'aria-live': 'off' }, snap.text),
+          // key 换成句子就重挂这一行，CSS 的淡入随之重放：默认句 → AI 句是"换"而不是"跳"。
+          // sentence 为 null 时显示 i18n 的默认句 —— 中文不写死在逻辑里。
+          h('span', {
+            key: sentence ?? 'tip-fallback',
+            className: CLASS.tipText,
+          }, sentence ?? t('tip.fallback')))))
     }
 
     /**
