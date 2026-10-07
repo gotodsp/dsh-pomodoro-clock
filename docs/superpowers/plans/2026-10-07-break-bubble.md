@@ -71,7 +71,7 @@ assert.ok(zh.user.includes('水'))          // water 角度映射到"喝水"
 const en = buildTipPrompt({ phase: 'long', round: 4, done: 7, now: '15:20', angle: 'distance', lang: 'en' })
 assert.ok(!/[\u4e00-\u9fff]/.test(en.user))
 assert.ok(en.user.toLowerCase().includes('distance'))
-// 英文用词数：必须与 Task 2 校验器的 3–12 词一致，否则生成的句子会被自己的校验器拒掉
+// 英文用词数：必须与 Task 2 校验器的 3–8 词一致，否则生成的句子会被自己的校验器拒掉
 assert.ok(/words/i.test(en.system) && !/characters/i.test(en.system))
 
 // 断言 4：五个角度都能映射出非空子句，且互不相同
@@ -138,7 +138,7 @@ assert.equal(validateTip('   ', 'zh'), false)              // 纯空白
 assert.equal(validateTip('去接杯水吧🙂', 'zh'), false)      // emoji
 assert.equal(validateTip('去接\n杯水吧', 'zh'), false)      // 换行
 
-// 英文按词数：3–12 词
+// 英文按词数：3–8 词
 assert.equal(validateTip('go grab some water', 'en'), true)
 assert.equal(validateTip('go', 'en'), false)
 assert.equal(validateTip(Array.from({ length: 13 }, () => 'walk').join(' '), 'en'), false)
