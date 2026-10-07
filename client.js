@@ -1373,11 +1373,14 @@ window.__ModuleLoader__.load({
       },
       h('circle', {
         cx: 90, cy: 90, r: TIP_RING_R, fill: 'none', strokeWidth: 9,
-        stroke: 'var(--dsp-pc-ring-soft,var(--dsw-alias-state-error-primary))',
+        // 颜色必须走 `style`，**不能**写成 `stroke="var(--…)"` 这种 presentation attribute：
+        // 自定义属性在那类属性里支持不可靠，失效就等于不描边 —— 整圈底色轨道会整个消失，
+        // 只剩进度弧那一截，看上去"环不完整、大片没有颜色"（实测反馈）。
+        style: { stroke: 'var(--dsp-pc-ring-soft,var(--dsw-alias-state-error-primary))' },
       }),
       h('circle', {
         cx: 90, cy: 90, r: TIP_RING_R, fill: 'none', strokeWidth: 9,
-        stroke: 'var(--dsp-pc-ring,var(--dsw-alias-state-error-primary))',
+        style: { stroke: 'var(--dsp-pc-ring,var(--dsw-alias-state-error-primary))' },
         strokeDasharray: TIP_RING_C,
         strokeDashoffset: TIP_RING_C * (1 - tipPercent),
         transform: 'rotate(-90 90 90)',
