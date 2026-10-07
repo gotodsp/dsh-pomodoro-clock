@@ -66,6 +66,13 @@ group('角度表与 prompt 构造')
   const firstUser = buildTipPrompt({ phase: 'short', round: 1, done: 1, now: '09:00', angle: TIP_ANGLES[0], lang: 'zh' }).user
   assert.equal(fallbackUser, firstUser)
   check(true, '未知角度不抛异常，且确实退到 TIP_ANGLES[0]', fallbackUser)
+
+  // 断言 6（修复轮 1）：done 是**累计**数（只有「清除统计」才归零），prompt 不许把它说成"今天"。
+  // 中英两条模板都要钉住 —— 只改一条，另一半照样把假前提递给模型。
+  assert.ok(!zh.user.includes('今天') && zh.user.includes('累计'), zh.user)
+  assert.ok(!/today/i.test(en.user) && /total/i.test(en.user), en.user)
+  check(true, 'done 说成"累计"而不是"今天"（中英模板都钉住，跨天不清零时不会递给模型假前提）',
+    `zh：${zh.user}`)
 }
 
 // ------------------------------------------------------------ 清洗与校验
@@ -759,6 +766,65 @@ group('客户端角度轮换 nextAngle（标记切片，与宿主那份互不依
   assert.deepEqual(TIP_ANGLES, HOST_ANGLES)
   check(true, '客户端副本与宿主 TIP_ANGLES 逐项一致（漂移会让新角度永远不被使用）',
     TIP_ANGLES.join(' / '))
+}
+
+// ------------------------------------------------------------ 迷你圆盘的按键归属（修复轮 1）
+
+// 折叠态根节点是 role="button"，小圆点（也是真实 button）嵌在它里面：Enter/空格在小圆点上按下时
+// 会冒泡到根节点的 onKeyDown。那里不加区分地 preventDefault()，被取消的正是小圆点**原生的点击**
+// —— 键盘用户按 Enter 想展开气泡，结果展开的是整个面板，气泡反而回不来（鼠标路径因为
+// onPointerDown 截住了冒泡而幸免）。判定已提成 miniRootKeyDown，这里用同一套标记切片法钉住它。
+//
+// 覆盖范围要说清楚：这里钉的是**判定本身**（什么情况下接手这次按键），不是组件里"把哪个回调
+// 传进去"的接线 —— 后者需要真实渲染，仓库里的切片法到不了，由未入库的临时冒烟测试覆盖
+// （路径与结果记在 task-5-report.md 的修复轮 1 一节）。
+function loadClientMiniRootKeyDown() {
+  const start = clientSource.indexOf('// --- tip-key:start ---')
+  const end = clientSource.indexOf('// --- tip-key:end ---', start)
+  if (start < 0 || end < 0) throw new Error('切片失败: // --- tip-key:start --- .. // --- tip-key:end ---')
+  const slice = clientSource.slice(start, end)
+  return new Function(`${slice}\nreturn { miniRootKeyDown }`)()
+}
+
+group('迷你圆盘的按键归属 miniRootKeyDown（标记切片）')
+{
+  const { miniRootKeyDown } = loadClientMiniRootKeyDown()
+  const root = { role: 'button' }
+  const dot = { role: 'button' }
+  const makeEvent = (target, key) => ({
+    target,
+    currentTarget: root,
+    key,
+    defaultPrevented: false,
+    preventDefault() { this.defaultPrevented = true },
+  })
+
+  // 1) 按键落在根节点本身：展开面板并 preventDefault —— 原来就是这条路径，行为不变。
+  let expanded = 0
+  const onRoot = makeEvent(root, 'Enter')
+  assert.equal(miniRootKeyDown(onRoot, () => { expanded += 1 }), true)
+  assert.equal(onRoot.defaultPrevented, true)
+  assert.equal(expanded, 1)
+  check(true, '焦点在根节点本身时 Enter 展开面板（原行为不变）',
+    `expanded=${expanded}，preventDefault=${onRoot.defaultPrevented}`)
+
+  // 2) 按键落在小圆点（target 是子节点）：一律放行 —— 不 preventDefault、不展开面板，
+  //    好让小圆点自己的原生点击（→ 展开气泡）照常发生。修复前这里会把面板展开。
+  for (const key of ['Enter', ' ']) {
+    let calls = 0
+    const onDot = makeEvent(dot, key)
+    assert.equal(miniRootKeyDown(onDot, () => { calls += 1 }), false)
+    assert.equal(onDot.defaultPrevented, false)
+    assert.equal(calls, 0)
+  }
+  check(true, '焦点在小圆点上时 Enter/空格一律放行（不再抢走它的原生点击、不再展开面板）',
+    'target=小圆点 / currentTarget=根节点 → 返回 false 且 preventDefault 未被调用')
+
+  // 3) 其它按键一概不管（哪怕落在根节点上）：不 preventDefault、不展开。
+  const onOther = makeEvent(root, 'a')
+  assert.equal(miniRootKeyDown(onOther, () => { throw new Error('不该被调用') }), false)
+  assert.equal(onOther.defaultPrevented, false)
+  check(true, '其它按键一概不管（不 preventDefault、不展开）', "key='a'")
 }
 
 // ---------------------------------------------------------------- 汇总

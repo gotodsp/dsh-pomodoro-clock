@@ -1183,6 +1183,30 @@ window.__ModuleLoader__.load({
       event.stopPropagation()
     }
 
+    // --- tip-key:start ---
+    /**
+     * 折叠态圆盘根节点的按键处理：只有按键**发生在根节点本身**时才展开面板。
+     *
+     * 为什么必须看 target：小圆点（TipDot）是根节点的子节点，它自己也是一个真实的 button，
+     * 并且是键盘用户展开气泡的唯一入口。Enter/空格在它身上按下时照样会冒泡到根节点的
+     * onKeyDown —— 在那里不加区分地 preventDefault()，被取消的正是小圆点**原生的点击**，
+     * 结果是「按 Enter 想展开气泡，却把整个时钟展开成了面板」，而气泡再也回不来。
+     * 鼠标路径没有这个问题，只是因为小圆点的 onPointerDown 把冒泡截住了。
+     *
+     * 返回值只给测试看（test/tip.test.mjs 按这里的标记切片求值）：true = 本函数接手了这次按键。
+     * @param {{ target: unknown, currentTarget: unknown, key: string, preventDefault(): void }} event
+     * @param {() => void} expandPanel 展开面板
+     * @returns {boolean} 是否已处理这次按键
+     */
+    function miniRootKeyDown(event, expandPanel) {
+      if (event.target !== event.currentTarget) return false
+      if (event.key !== 'Enter' && event.key !== ' ') return false
+      event.preventDefault()
+      expandPanel()
+      return true
+    }
+    // --- tip-key:end ---
+
     /**
      * 中上方的 148px 圆形气泡：三行 = 阶段名 / 剩余时间 / 提醒句。
      *
@@ -1195,7 +1219,6 @@ window.__ModuleLoader__.load({
     function BreakTip({ snap, t, sentence, onDismiss }) {
       return h('div', {
         className: CLASS.tip,
-        'data-pomodoro-tip': 'bubble',
         role: 'group',
         'aria-label': t('tip.title'),
       },
@@ -1225,13 +1248,20 @@ window.__ModuleLoader__.load({
      * 面板之间切换，它都跟着走，不需要任何测量。
      * `onPointerDown` 必须截住：圆盘态的父节点在 pointerdown 上起拖动、按位移判点击，
      * 不截住的话点这个小圆点会顺带把部件展开成面板。
+     *
+     * **已知的 ARIA 代价（有意保留，不是疏漏）**：圆盘态的父节点是 `role="button"`，而
+     * button 这个角色的后代在可访问性树里按规范是 presentational —— 也就是说这个真实
+     * `<button>`（连同它的 aria-label）可能**不会被当成独立控件**暴露给辅助技术：用户听到的
+     * 是外层那个「展开 · 阶段 剩余时间」按钮。仍然可用的两条路是鼠标点击、以及键盘 Tab 到它
+     * 再按 Enter/空格展开气泡（后者由 miniRootKeyDown 保证，见那个函数的说明）。
+     * 替代方案是把小圆点挪到根节点外面，那就需要"测量根节点位置"的循环才跟得上被拖动的圆盘
+     * —— 比"某个屏幕阅读器少一个控件"更糟，所以维持嵌套。**改这里前先读这段。**
      */
     function TipDot({ snap, t, onExpand }) {
       const label = `${t('action.expandTip')} · ${snap.text}`
       return h('button', {
         type: 'button',
         className: CLASS.tipDot,
-        'data-pomodoro-tip': 'dot',
         onPointerDown: stopPointer,
         onMouseDown: (event) => event.preventDefault(),
         onClick: onExpand,
@@ -1283,7 +1313,8 @@ window.__ModuleLoader__.load({
           phase: breakPhase,
           // 休息期间 cycleFocus 就是「本轮第几个番茄」（专注结束时先加一、再判长休息）。
           round: String(snap.cycleFocus),
-          // 模型没有"今天"这个维度，completedFocus 就是设置面板里那个「已完成」总数。
+          // 模型没有"今天"这个维度，completedFocus 就是设置面板里那个「已完成」总数；
+          // 宿主 prompt 因此只写「已完成（累计）」，不写"今天"（见 index.js 的 buildTipPrompt）。
           done: String(snap.completedFocus),
           angle,
           lang,
@@ -1427,9 +1458,8 @@ window.__ModuleLoader__.load({
           'aria-label': `${t('action.expand')} · ${phaseLabel(snap.phase)} ${snap.text}`,
           onPointerDown: (event) => beginDrag(event, () => updateUi({ collapsed: false })),
           onKeyDown: (event) => {
-            if (event.key !== 'Enter' && event.key !== ' ') return
-            event.preventDefault()
-            updateUi({ collapsed: false })
+            // 小圆点（子节点）上的 Enter/空格不属于这里：它有自己的原生点击，见 miniRootKeyDown。
+            miniRootKeyDown(event, () => updateUi({ collapsed: false }))
           },
         },
         h('span', {

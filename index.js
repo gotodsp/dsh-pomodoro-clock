@@ -75,7 +75,7 @@ const TIP_CLAUSE_EN = {
 /**
  * 构造一次提醒句生成的 prompt。
  * @param {{ phase: 'short'|'long', round: number, done: number, now: string, angle: string, lang: 'zh'|'en' }} input
- *   phase 当前休息阶段；round 本轮第几个番茄；done 今天已完成几个；
+ *   phase 当前休息阶段；round 本轮第几个番茄；done 已完成几个（**累计**，只有「清除统计」才归零）；
  *   now 调用方算好的本地时间短串（如 '15:20'）——本函数不取时间，保持纯、可测；
  *   angle 本次角度（未知取值回退 TIP_ANGLES[0]）；lang 界面语言。
  * @returns {{ system: string, user: string }} 只有 lang 为 'en' 时取英文模板，其余（含缺陷值）按中文。
@@ -85,13 +85,16 @@ export function buildTipPrompt(input) {
   // 未知角度（客户端版本更新、query 被手改）不能抛：退回第一个角度，最坏只是轮换少一档。
   const safeAngle = TIP_ANGLES.includes(angle) ? angle : TIP_ANGLES[0]
   const safeRound = Number.isFinite(round) ? round : 1
+  // done 是**累计**数（客户端发的 completedFocus 只在「清除统计」时归零），没有按天的维度。
+  // 所以 prompt 只能写「累计」，不许写「今天」：跨天不清零时"今天已完成 12 个"是递给模型的
+  // 假前提，它会顺着这个前提编。按天计数是另一个任务，这里不做，也不假装有。
   const safeDone = Number.isFinite(done) ? done : 0
 
   if (lang === 'en') {
     const phaseText = phase === 'long' ? 'long break' : 'short break'
     return {
       system: TIP_SYSTEM_EN,
-      user: `State: ${phaseText}, pomodoro ${safeRound} of this cycle, ${safeDone} finished today,`
+      user: `State: ${phaseText}, pomodoro ${safeRound} of this cycle, ${safeDone} completed in total,`
         + ` current time ${now}.`
         + ` Angle for this tip: ${TIP_CLAUSE_EN[safeAngle]}. Write the tip in English.`,
     }
@@ -100,7 +103,7 @@ export function buildTipPrompt(input) {
   const phaseText = phase === 'long' ? '长休息' : '短休息'
   return {
     system: TIP_SYSTEM_ZH,
-    user: `状态：${phaseText}，本轮第 ${safeRound} 个番茄，今天已完成 ${safeDone} 个，当前时间 ${now}。`
+    user: `状态：${phaseText}，本轮第 ${safeRound} 个番茄，已完成 ${safeDone} 个（累计），当前时间 ${now}。`
       + `这句话的角度：${TIP_CLAUSE_ZH[safeAngle]}。用中文写这句话。`,
   }
 }
