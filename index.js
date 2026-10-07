@@ -79,3 +79,94 @@ export function buildTipPrompt(input) {
       + `这句话的角度：${TIP_CLAUSE_ZH[safeAngle]}。用中文写这句话。`,
   }
 }
+
+// ------------------------------------------------------------ 清洗与校验
+//
+// 生成出来的句子先清洗、再校验，两步都是纯函数：清洗尽量把一句话救回来（包裹引号、换行、
+// 客套前缀），校验只回答「能不能进气泡」。校验的长度界必须与上面 system 里写的界一致：
+// 不一致的后果是「按 prompt 生成的句子被自己的校验器拒掉」，路径永远回退默认句，而且在
+// 任何地方都看不出原因——Task 1 的英文长度单位就在这上面栽过一次，改这里时连着 system 一起看。
+
+/** 成对包裹的引号：中文直角引号、弯引号与英文直引号。键是开引号，值是配对的闭引号。 */
+const TIP_QUOTE_PAIRS = [
+  ['「', '」'],
+  ['『', '』'],
+  ['“', '”'],
+  ['‘', '’'],
+  ['"', '"'],
+  ["'", "'"],
+]
+
+/** 开头的客套话术。**必须跟着分隔符**才算数（否则会把「好的心情」这类正文削掉），可连续出现多次。 */
+const TIP_POLITE_OPENER = /^(?:(?:好的|好呀|好嘞|没问题|当然|可以|明白|收到|OK|Okay|Sure|Alright|Of course)[,，、:：!！.。\s]+)+/iu
+
+/** 换行与制表符：一律直接删掉，不换成空格——中文句子被换行拆开时，换空格会多出一个空档。 */
+const TIP_LINE_BREAK = /[\n\r\t\u2028\u2029]+/g
+
+/** emoji：扩展象形字符，外加区域指示符（成对拼出国旗，单个不在象形范围内）。 */
+const TIP_EMOJI = /[\p{Extended_Pictographic}\p{Regional_Indicator}]/u
+
+/** 换行：清洗阶段已经删过，校验阶段再挡一次，防止调用方跳过清洗直接把原文递进来。 */
+const TIP_NEWLINE = /[\n\r\u2028\u2029]/
+
+/** 汉字（CJK 统一表意文字）。中文字数只数它们：标点、空白、字母、数字都不计入。 */
+const TIP_HAN = /[\u4e00-\u9fff]/
+
+/** 脱掉最外层成对的引号，可嵌套（「"…"」）。落单的引号不猜着删。 */
+function stripWrappingQuotes(text) {
+  let out = text
+  for (;;) {
+    const pair = TIP_QUOTE_PAIRS.find(([open, close]) => out.length > 1 && out.startsWith(open) && out.endsWith(close))
+    if (!pair) return out
+    out = out.slice(pair[0].length, out.length - pair[1].length).trim()
+  }
+}
+
+/** 数汉字个数：按码点遍历，代理对不会被拆成两半。 */
+function countHan(text) {
+  let count = 0
+  for (const ch of text) if (TIP_HAN.test(ch)) count += 1
+  return count
+}
+
+/**
+ * 清洗模型返回的一句话。
+ * 顺序：首尾空白 → 脱包裹引号 → 削开头客套 → 再脱一次引号（客套削掉后才露出来的那些）
+ * → 删掉换行与制表符 → 再 trim。清得干净不等于可用，可用性由 validateTip 判。
+ * @param {string} raw 模型拼出来的原文
+ * @returns {string} 清洗后的文本（可能是空串）
+ */
+export function sanitizeTip(raw) {
+  let text = stripWrappingQuotes(raw.trim())
+  text = text.replace(TIP_POLITE_OPENER, '').trim()
+  text = stripWrappingQuotes(text)
+  return text.replace(TIP_LINE_BREAK, '').trim()
+}
+
+/**
+ * 校验一句话能不能进 148px 的气泡。
+ * 长度界与 system 的约束一致（不一致会让生成即被自己拒掉、永远回退默认句）：
+ *   - zh：6–24 个汉字，**标点与空白不计入**。prompt 要求「12 到 20 个汉字」，正落在界内；
+ *     若把标点也算进 6–24，一句 20 汉字 + 5 标点（25 个字符）的好回答会被自己拒掉。
+ *   - en：3–12 个词，按空白分词，与英文 system 的「3 and 12 words」一致。
+ * lang 只认 'en'，其余取值（含缺陷值）一律按中文校验，与 buildTipPrompt 的取值约定相同。
+ * @param {string} text 待校验文本（通常是 sanitizeTip 的结果）
+ * @param {'zh'|'en'} lang 界面语言
+ * @returns {boolean} true 表示可以进气泡
+ */
+export function validateTip(text, lang) {
+  // 判定器对任何输入都给出布尔答案；sanitizeTip 相反——它的入参是必填字符串，
+  // 调用方传错就让它显式抛错，而不是被静默吞成一句空话（与 buildTipPrompt 不做静默兜底一致）。
+  if (typeof text !== 'string') return false
+  const trimmed = text.trim()
+  if (trimmed === '') return false
+  if (TIP_EMOJI.test(trimmed)) return false
+  if (TIP_NEWLINE.test(trimmed)) return false
+
+  if (lang === 'en') {
+    const words = trimmed.split(/\s+/).length
+    return words >= 3 && words <= 12
+  }
+  const han = countHan(trimmed)
+  return han >= 6 && han <= 24
+}
