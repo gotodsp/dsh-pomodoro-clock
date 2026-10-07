@@ -73,7 +73,8 @@ const en = buildTipPrompt({ phase: 'long', round: 4, done: 7, now: '15:20', angl
 assert.ok(!/[\u4e00-\u9fff]/.test(en.user))
 assert.ok(en.user.toLowerCase().includes('distance'))
 // 英文用词数：必须与 Task 2 校验器的 3–8 词一致，否则生成的句子会被自己的校验器拒掉
-assert.ok(/words/i.test(en.system) && !/characters/i.test(en.system))
+// 英文 prompt 必须同时说出词数界与整句字符预算（只写词数会让「7 词但 63 码点」被上限拒掉）
+assert.ok(/words/i.test(en.system) && /characters/i.test(en.system))
 
 // 断言 4：五个角度都能映射出非空子句，且互不相同
 const clauses = TIP_ANGLES.map((a) => buildTipPrompt({ phase: 'short', round: 1, done: 1, now: '09:00', angle: a, lang: 'zh' }).user)
