@@ -35,14 +35,21 @@ export function apply(ctx) {
 // ------------------------------------------------------------ 休息提醒：构句
 //
 // 纯逻辑（构句、清洗、校验）以具名导出放这里，路由与模型调用是薄适配层。
-// 发给模型的只有状态数字与角度，不含任何对话内容、文件内容或工作区路径。
+// 发给模型的只有数字与时间：状态计数（阶段 / 本轮第几个 / 累计几个）、本地时间 HH:MM 与角度，
+// 不含任何对话内容、文件内容或工作区路径。（原注释写的是「只有状态数字与角度」，漏了时间，
+// 与 buildTipPrompt 实际发的字段不符——计划里早已改成「数字与时间」，这里跟齐。）
 
 /** 提醒角度的轮换顺序。客户端切片里自留一份同样的列表（浏览器包无法 import 本文件），
  *  两边顺序必须一致；消费方对本表之外的取值一律回退到第一个角度。 */
 export const TIP_ANGLES = ['water', 'distance', 'walk', 'stretch', 'breathe']
 
+// 中文的长度界也有两条，system 必须把两条都说出来（与「清洗与校验」一节开头那段不变量同一件事）：
+// 汉字数 12–20（校验器实际按 6–24 判，留了余量），以及整句 ≤ 30 码点。**30 那条原先没写**，
+// 于是「按 prompt 生成的句子被自己的校验器拒掉」这个缺陷类在中文路径上还留着最后一点残渣
+// （汉字数合规、标点一多就超 30）；2026-10-07 的整支评审把它补进 system，现在中英一致。
 const TIP_SYSTEM_ZH = '你是休息提醒助手。'
-  + '只输出一句提醒，字数严格控制在 12 到 20 个汉字之间，不加任何解释或前后缀。'
+  + '只输出一句提醒，字数严格控制在 12 到 20 个汉字之间，连标点在内不超过 30 个字符，'
+  + '不加任何解释或前后缀。'
   + '不要用引号，不要用 emoji，不要说教，不要用「好的」「建议你」这类客套开头。'
 
 // 英文的长度界有两条，prompt 必须把两条都说出来：词数 3–8（校验器按空白分词），以及整句 ≤ 60 字符
@@ -114,8 +121,10 @@ export function buildTipPrompt(input) {
 // 客套前缀），校验只回答「能不能进气泡」。校验的长度界必须与上面 system 里写的界一致：
 // 不一致的后果是「按 prompt 生成的句子被自己的校验器拒掉」，路径永远回退默认句，而且在
 // 任何地方都看不出原因——Task 1 的英文长度单位就在这上面栽过一次，改这里时连着 system 一起看。
-// 长度界不止一条（词数/汉字数 + 码点上限），**每一条都要写进 prompt**：宽度兜底那条不说出来，
-// 按 prompt 生成的长句照样会被它拒（英文 7 词 63 码点就是这么暴露的），不变量就成了假的。
+// 长度界不止一条（词数/汉字数 + 码点上限），**每一条都要写进 prompt**，中英都是如此：宽度兜底
+// 那条不说出来，按 prompt 生成的长句照样会被它拒（英文 7 词 63 码点就是这么暴露的），不变量就成了
+// 假的。中文这条 30 码点上限原先只在校验器里、system 没说——2026-10-07 的整支评审发现注释在替
+// 代码吹牛，补的是 system（不是放宽校验器），现在这句话才是真的。
 
 /** 成对包裹的引号：中文直角引号、弯引号与英文直引号。键是开引号，值是配对的闭引号。 */
 const TIP_QUOTE_PAIRS = [
@@ -201,6 +210,8 @@ export function sanitizeTip(raw) {
  * 长度界与 system 的约束一致（不一致会让生成即被自己拒掉、永远回退默认句）：
  *   - zh：6–24 个汉字，**标点与空白不计入**，再叠 ≤ 30 码点。prompt 要求「12 到 20 个汉字」，
  *     正落在界内；若把标点也算进 6–24，一句 20 汉字 + 5 标点（25 个字符）的好回答会被自己拒掉。
+ *     中文的两条界都写进了 zh system（汉字数，以及「连标点在内不超过 30 个字符」的码点上限），
+ *     所以按 prompt 生成的句子不会落在界外。
  *   - en：3–8 个词，按空白分词，再叠 ≤ 60 码点。两条界都写进了英文 system
  *     （「3 and 8 words」与「within 60 characters」），所以按 prompt 生成的句子不会落在界外；
  *     只说词数时，一句 7 词、63 码点的回答按 prompt 合规却被上限拒——不变量就成了假的。
@@ -260,6 +271,15 @@ const TIP_MAX_TOKENS = 60
  *  resolveTip 据此去掉该字段重试一次（见那里），别让「换了个不支持推理的默认模型」变成永久 204。 */
 const TIP_REASONING_EFFORT = 'off'
 
+/** 值得去掉 reasoningEffort 再试一次的终止性失败码——**只有我们自己加的那个字段被拒**才在表内。
+ *
+ *  重试的成本是真的：第二次是又一次真实请求（会计费）。所以这里是一张显式白名单，不是
+ *  「任何 error 都重试」：auth 失效 / 额度用尽 / 网络故障换一份请求体照样失败，第二枪只是
+ *  白烧一次调用，而结论一模一样。（原实现就是「任何 error 都重试」，与注释里写的
+ *  「provider 不认 reasoningEffort」不符——2026-10-07 整支评审的 Finding 5 收窄成这张表。）
+ *  表外的 error 一律不重试，失败照常映射成 204 + 那一行短码。 */
+const TIP_RETRYABLE_ERROR_CODES = new Set(['UNSUPPORTED_REASONING_EFFORT'])
+
 /**
  * 把「为什么回退默认句」这一个短码交给调用方的日志钩子。纯逻辑不依赖它：钩子缺席、抛错都无影响。
  * 只传短码与数字，**不传模型正文**——生成内容不进宿主日志。
@@ -274,6 +294,13 @@ function reportTipFailure(deps, reason) {
   }
 }
 
+/** signal 已 abort 时的短码：clientSignal 先 abort 就是用户切走，否则是我们自己的内部期限。
+ *  抽成一个函数是因为**三个判定点必须说同一句话**（读 chunk 时、迭代抛错时、没有终止块时），
+ *  各写各的就会漂移——下一条注释里那次误报正是漂移出来的。只有 signal 已 abort 时才调用。 */
+function abortShortCode(clientSignal) {
+  return clientSignal?.aborted ? 'client-abort' : 'timeout'
+}
+
 /**
  * 跑一次生成尝试：建流并消费到终止块（或流结束），返回这次尝试的结局。**不抛。**
  * 与 llm 服务的协议：每次调用都以一个终止 `finish` 块收尾；`llm.stream()` 与流的迭代都可能抛错，
@@ -285,7 +312,10 @@ function reportTipFailure(deps, reason) {
  * @returns {Promise<{ text: string, stopped: boolean, errorCode?: string, reason: string }>}
  *   stopped 只表示「以 finish{kind:'stop'} 干净收尾」，text 才可采纳；
  *   errorCode 只在适配器以终止性 finish{kind:'error'} 失败时出现（调用方据此决定要不要重试）；
- *   reason 是给宿主日志的短码，同时也是这条路径的失败分类。
+ *   reason 是给宿主日志的短码，同时也是这条路径的失败分类。**abort 引起的失败按 signal 归类**：
+ *   适配器完全可以用 reject 来兑现 signal（合理契约），那也仍旧是 timeout / client-abort，
+ *   不是 iteration-threw，否则 README 失败矩阵里那一行（timeout）与日志对不上，读的人会去查一个
+ *   并不存在的网络故障。（实机复现：3016ms 的超时日志短码是 iteration-threw，见 Finding 2。）
  */
 async function runTipAttempt(llm, request, clientSignal, signal) {
   let stream
@@ -303,7 +333,7 @@ async function runTipAttempt(llm, request, clientSignal, signal) {
       // 用户切走 / 超时：已攒的内容一律丢弃，这句话已经没人要了。
       // 两者共用同一个合并 signal，靠 clientSignal 区分是哪一种（写进日志的原因不同）。
       if (signal.aborted) {
-        return { text: '', stopped: false, reason: clientSignal?.aborted ? 'client-abort' : 'timeout' }
+        return { text: '', stopped: false, reason: abortShortCode(clientSignal) }
       }
       // 只认 text-delta：reasoning-delta 是模型的思考过程，绝不能进气泡。
       if (chunk?.type === 'text-delta') {
@@ -333,12 +363,16 @@ async function runTipAttempt(llm, request, clientSignal, signal) {
       }
     }
   } catch {
-    // 迭代中抛错（网络断等）：异常不外泄
-    return { text: '', stopped: false, reason: 'iteration-threw' }
+    // 迭代中抛错（网络断、以及适配器用 reject 兑现 signal）：异常不外泄。
+    // 但**不能一律记 iteration-threw**：signal 已 abort 时真实原因是取消/超时（见函数头注释）。
+    return { text: '', stopped: false, reason: signal.aborted ? abortShortCode(clientSignal) : 'iteration-threw' }
   }
 
   // 一次调用没有终止块 = 流被截断（适配器约定每次调用都以 finish 收尾），不采纳。
-  if (!stopped) return { text, stopped: false, reason: 'no-finish' }
+  // 同上：流因 abort 而提前干净结束也走这里，真实原因按 signal 归类，不是「被截断」。
+  if (!stopped) {
+    return { text, stopped: false, reason: signal.aborted ? abortShortCode(clientSignal) : 'no-finish' }
+  }
   return { text, stopped: true, reason: 'stop' }
 }
 
@@ -347,11 +381,14 @@ async function runTipAttempt(llm, request, clientSignal, signal) {
  *
  * 失败矩阵（全部返回 null，任何一条都不抛）：服务缺席、模型抛错、空响应、校验不过
  * （太短/太长/客套长句）、终止原因非 stop、外部取消、内部超时。
- * 「适配器以 error 收尾」这一条会去掉 reasoningEffort 再试一次（见下），两次都失败仍返回 null。
- * @param {{ llm?: { stream(o: object): AsyncIterable<object> }, provider: string, model: string, signal?: AbortSignal, onFailure?: (reason: string) => void }} deps
+ * 「适配器以 UNSUPPORTED_REASONING_EFFORT 收尾」这一条会去掉 reasoningEffort 再试一次（见下），
+ * 两次都失败仍返回 null；表外的 error（auth / quota / 网络…）**一次都不重试**，不白烧第二次请求。
+ * @param {{ llm?: { stream(o: object): AsyncIterable<object> }, provider: string, model: string, signal?: AbortSignal, timeoutMs?: number, onFailure?: (reason: string) => void }} deps
  *   llm 是宿主上下文里的 llm 服务（`ctx.get('llm')`），缺席即第一道降级；
  *   provider / model 由调用方按用户当前选择传入，本函数不硬编码；
  *   signal 是外部取消（路由在客户端断开时 abort 它）；
+ *   timeoutMs 是内部期限的接缝（缺席即 TIP_TIMEOUT_MS = 3000）：留给测试便宜地验证
+ *   「期限真的会砍掉慢调用」，生产调用方不传；
  *   onFailure 可选：回退默认句时回调一个短码，宿主路由拿它写日志（HTTP 上 204 与「插件坏了」同形）。
  * @param {{ phase: 'short'|'long', round: number, done: number, now: string, angle: string, lang: 'zh'|'en' }} input
  *   与 buildTipPrompt 同形的状态输入，lang 同时决定校验用哪套长度界。
@@ -371,11 +408,14 @@ export async function resolveTip(deps, input) {
     // （放进 try 里：传进来的 signal 若不是真的 AbortSignal，AbortSignal.any 会抛错，
     //   这里同样按「回退默认句」处理，不外泄。）
     // 两次尝试共用这一个 signal：3 秒的内部期限覆盖**整次生成**，重试不会把它翻倍。
+    // 期限本身可注入（见 deps.timeoutMs）：生产路径不传，就是 TIP_TIMEOUT_MS 的 3000ms；
+    // 非法取值（NaN / 0 / 负数）同样退回 3000，不把坏参数变成「立刻超时」或抛错。
+    const timeoutMs = Number.isFinite(deps.timeoutMs) && deps.timeoutMs > 0 ? deps.timeoutMs : TIP_TIMEOUT_MS
     const signal = deps.signal
-      ? AbortSignal.any([deps.signal, AbortSignal.timeout(TIP_TIMEOUT_MS)])
-      : AbortSignal.timeout(TIP_TIMEOUT_MS)
+      ? AbortSignal.any([deps.signal, AbortSignal.timeout(timeoutMs)])
+      : AbortSignal.timeout(timeoutMs)
     if (signal.aborted) {
-      reportTipFailure(deps, deps.signal?.aborted ? 'client-abort' : 'timeout')
+      reportTipFailure(deps, abortShortCode(deps.signal))
       return null
     }
 
@@ -393,12 +433,14 @@ export async function resolveTip(deps, input) {
 
     let attempt = await runTipAttempt(llm, requestWith(TIP_REASONING_EFFORT), deps.signal, signal)
 
-    // 第一次以终止性 error 失败时，去掉 reasoningEffort 再试一次：这个字段是**我们**加的，
-    // 而 provider 不认它（能力校验失败，没发真实请求）会让整条路径永久 204。重试只是换一份
-    // 请求体，**采纳标准一点没松**——第二次同样必须拿到 finish{kind:'stop'} 才返回正文。
-    // 三种情况不重试：已经拿到干净收尾、signal 已 abort（重试必然也失败）、失败不是 error
-    // （max-tokens / 没有终止块等，去掉字段只会让推理回来、更糟）。
-    if (attempt.errorCode !== undefined && !signal.aborted) {
+    // 只有**表内**的终止性 error 才重试（目前只有 UNSUPPORTED_REASONING_EFFORT）：这个字段是
+    // **我们**加的，而 provider 不认它时能力校验跑在派发之前（没发真实请求），去掉它再试一次
+    // 才有意义。别放宽成「任何 error」——auth / quota / 网络失败重试就是再发一次真实请求
+    // （真金白银计费），而结论不变；那类失败直接走下面的 204 + 短码。
+    // 三条不重试：已经拿到干净收尾、signal 已 abort（重试必然也失败）、失败码不在表内
+    // （max-tokens / 没有终止块等本来就没有 errorCode，去掉字段只会让推理回来、更糟）。
+    // 上限仍是两次尝试，且第一次就用掉了 reasoningEffort='off'。
+    if (TIP_RETRYABLE_ERROR_CODES.has(attempt.errorCode) && !signal.aborted) {
       attempt = await runTipAttempt(llm, requestWith(undefined), deps.signal, signal)
     }
 
@@ -512,13 +554,17 @@ function localHhMm() {
  * Number(null) 与 Number('') 都是 0：缺席或空串如果直接放过去，prompt 会拿到「本轮第 0 个
  * 番茄」，比 buildTipPrompt 的兜底（1 / 0）更糟，而且同样从外面看不出错。所以非数字串、
  * 空串、缺席一律返回 undefined，由调用方映射成 204。
+ * **只接受非负安全整数**（Finding 4）：`round=1.5` / `done=-3` 原来也能过 isFinite，于是一句
+ * 「本轮第 1.5 个番茄」的前提被当真的发给模型，还带着和正确答案一样的自信。isSafeInteger
+ * 同时挡掉 Infinity / NaN（它们本就不是整数）。客户端的 cycleFocus 起步是 0，所以
+ * `round=0` 仍然合法——那个 0 由客户端钳到 1（见 client.js 的 tipRoundParam），宿主不替它圆场。
  * @param {string | null} raw searchParams.get 的原文
- * @returns {number | undefined} 能安全使用的数字，或 undefined
+ * @returns {number | undefined} 能安全使用的非负整数，或 undefined
  */
 function parseCount(raw) {
   if (raw === null || raw.trim() === '') return undefined
   const value = Number(raw)
-  return Number.isFinite(value) ? value : undefined
+  return Number.isSafeInteger(value) && value >= 0 ? value : undefined
 }
 
 /**
@@ -538,7 +584,8 @@ async function handleTip(ctx, req, res) {
       return
     }
 
-    // 2. query：round / done 到这里是字符串，必须在进 resolveTip 前转成数字并验明有限；
+    // 2. query：round / done 到这里是字符串，必须在进 resolveTip 前转成数字并验明是**非负安全
+    //    整数**（parseCount；1.5 / -3 / Infinity 一律 204，见那里的注释）；
     //    phase / angle / lang 原样传下去，取值合法性由 buildTipPrompt 兜底（未知角度回退第一档）。
     const params = new URL(req.url ?? '/', 'http://dsh.invalid').searchParams
     const round = parseCount(params.get('round'))

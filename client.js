@@ -1207,6 +1207,46 @@ window.__ModuleLoader__.load({
     }
     // --- tip-key:end ---
 
+    // --- tip-focus:start ---
+    /**
+     * ✕ 的这次激活是不是键盘来的。
+     *
+     * 为什么必须分开：鼠标点 ✕ 时焦点本来就该留在用户原来编辑的地方（所以 ✕ 的 mousedown 里
+     * preventDefault，气泡挂载时也不抢焦点）；但**键盘**激活 ✕ 之后气泡随卸载消失，焦点掉回
+     * `document.body`，剩下的唯一控件是那个 30px 小圆点——键盘用户得从文档开头重新 Tab 一整圈
+     * 才能碰到它，README 里「键盘可达」那句话在这一步是假的。这条修复只覆盖键盘路径，
+     * 与 spec 的「不抢输入焦点」（讲的是气泡**自己冒出来**时不许抢）不冲突。
+     *
+     * 判定用 MouseEvent.detail：真实指针点击是点击计数（≥1），键盘（Enter/空格）与辅助技术
+     * 合成的 click 都是 0。没有 detail 字段时按「不是键盘」处理——宁可不动焦点，也不误抢。
+     * 返回值只给测试看（test/tip.test.mjs 按这里的标记切片求值）。
+     * @param {{ detail?: number } | undefined} event ✕ 上的 click 事件
+     * @returns {boolean} true = 这次收起要把焦点交给小圆点
+     */
+    function tipCloseFromKeyboard(event) {
+      return event?.detail === 0
+    }
+    // --- tip-focus:end ---
+
+    // --- tip-round:start ---
+    /**
+     * 发给宿主的 round 参数：休息期间 cycleFocus 就是「本轮第几个番茄」（专注结束时先加一、
+     * 再判长休息），**但它可以是 0**：开机、长休息结束回到专注、长休息中途切到专注、清除统计
+     * 之后，这四种状态都是一次普通点击就能到的（点「短休息」胶囊）。
+     *
+     * 0 是宿主**接受**的合法整数（0 不是非法输入），所以不会 204——它会一路走进 prompt，
+     * 让模型听到「本轮第 0 个番茄」这个假前提，然后顺着编。宿主那边有意不做静默兜底
+     * （见 index.js 的 parseCount：严格是策略，不是疏漏），所以圆场必须在客户端做：
+     * 钳到 1 是这四个状态下最不误导的说法（0 只表示「还没走完一个番茄」）。
+     * 返回值只给测试看（test/tip.test.mjs 按这里的标记切片求值）。
+     * @param {number} cycleFocus 模型里的周期位置（可能是 0）
+     * @returns {string} 最小为 1 的整数字符串
+     */
+    function tipRoundParam(cycleFocus) {
+      return String(Math.max(1, cycleFocus))
+    }
+    // --- tip-round:end ---
+
     /**
      * 中上方的 148px 圆形气泡：三行 = 阶段名 / 剩余时间 / 提醒句。
      *
@@ -1215,6 +1255,10 @@ window.__ModuleLoader__.load({
      * 浮层其余部分照旧点击穿透。
      * 不抢输入焦点：挂载时不调用 focus()，✕ 的 mousedown 也 preventDefault ——
      * 点它不会把光标从正在编辑的地方带走。
+     * 唯一的例外是**键盘**激活 ✕（见 tipCloseFromKeyboard）：那不是「抢」，是收尾——
+     * 被激活的按钮马上要随气泡一起卸载，焦点无主，交给小圆点才不会让键盘用户从头 Tab。
+     * @param {{ onDismiss: (fromKeyboard: boolean) => void }} props
+     *   onDismiss 的参数为 true 表示这次收起来自键盘激活（见 tipCloseFromKeyboard）。
      */
     function BreakTip({ snap, t, sentence, onDismiss }) {
       return h('div', {
@@ -1226,7 +1270,8 @@ window.__ModuleLoader__.load({
         type: 'button',
         className: CLASS.tipClose,
         onMouseDown: (event) => event.preventDefault(),
-        onClick: onDismiss,
+        // detail === 0 说明这次 click 是键盘/辅助技术合成的：收起之后要把焦点交给小圆点。
+        onClick: (event) => onDismiss(tipCloseFromKeyboard(event)),
         'aria-label': t('action.dismissTip'),
         title: t('action.dismissTip'),
       }, closeIcon()),
@@ -1256,11 +1301,17 @@ window.__ModuleLoader__.load({
      * 再按 Enter/空格展开气泡（后者由 miniRootKeyDown 保证，见那个函数的说明）。
      * 替代方案是把小圆点挪到根节点外面，那就需要"测量根节点位置"的循环才跟得上被拖动的圆盘
      * —— 比"某个屏幕阅读器少一个控件"更糟，所以维持嵌套。**改这里前先读这段。**
+     *
+     * innerRef 是给键盘路径用的（Finding 6）：✕ 被键盘激活而收起时，焦点要在提交之后落到这里。
+     * 用自定义属性名而不是 `ref`：TipDot 是普通函数组件，React 18 下 `ref` 需要 forwardRef 才
+     * 传得进去，改属性名就不用赌运行时的 React 版本。
+     * @param {{ innerRef?: { current: unknown } }} props
      */
-    function TipDot({ snap, t, onExpand }) {
+    function TipDot({ snap, t, onExpand, innerRef }) {
       const label = `${t('action.expandTip')} · ${snap.text}`
       return h('button', {
         type: 'button',
+        ref: innerRef,
         className: CLASS.tipDot,
         onPointerDown: stopPointer,
         onMouseDown: (event) => event.preventDefault(),
@@ -1280,7 +1331,25 @@ window.__ModuleLoader__.load({
       const [tipDismissed, setTipDismissed] = React.useState(false)
       const [tipSentence, setTipSentence] = React.useState(null)
       const rootRef = React.useRef(null)
+      // 键盘激活 ✕ 时把焦点交给小圆点（Finding 6）：见 tipCloseFromKeyboard 与下面的 effect。
+      const tipDotRef = React.useRef(null)
+      const restoreTipFocus = React.useRef(false)
       useLocaleRefresh(subscribeLocale)
+
+      /** ✕ 收起气泡。fromKeyboard 为真才动焦点——鼠标点击时焦点该留在用户原来编辑的地方，
+       *  那条「不抢输入焦点」的约束在这里继续成立（见 BreakTip 的说明）。 */
+      const dismissTip = (fromKeyboard) => {
+        restoreTipFocus.current = fromKeyboard === true
+        setTipDismissed(true)
+      }
+
+      // 焦点只能在**提交之后**交给小圆点：收起的那一刻它才挂载。标记在这里清掉，
+      // 免得下一轮休息复用时凭空抢一次焦点。restoreTipFocus 为假时（鼠标点 ✕）什么都不做。
+      React.useEffect(() => {
+        if (!tipDismissed || !restoreTipFocus.current) return
+        restoreTipFocus.current = false
+        tipDotRef.current?.focus?.()
+      }, [tipDismissed])
 
       // 休息阶段的判断只在这里做一次：三个阶段里只有 short / long 出气泡，
       // 切到专注就是"散掉"（return null 的渲染分支 + effect 清理里的 abort）。
@@ -1307,12 +1376,13 @@ window.__ModuleLoader__.load({
         writeAngle(angle)
         const controller = new AbortController()
         let live = true
-        // 五个参数一个都不能少：宿主对缺席或非数字的 round / done 一律 204
-        // （它有意不做 Number(null) === 0 那种静默兜底，见 index.js 的 parseCount）。
+        // 五个参数一个都不能少：宿主对缺席、非数字或非整数（小数/负数）的 round / done
+        // 一律 204（它有意不做 Number(null) === 0 那种静默兜底，见 index.js 的 parseCount）。
         const query = new URLSearchParams({
           phase: breakPhase,
-          // 休息期间 cycleFocus 就是「本轮第几个番茄」（专注结束时先加一、再判长休息）。
-          round: String(snap.cycleFocus),
+          // 0 必须在这里钳成 1：宿主接受 0，于是 prompt 会真写出「本轮第 0 个番茄」。
+          // 四种到达方式与理由见 tipRoundParam 的说明。
+          round: tipRoundParam(snap.cycleFocus),
           // 模型没有"今天"这个维度，completedFocus 就是设置面板里那个「已完成」总数；
           // 宿主 prompt 因此只写「已完成（累计）」，不写"今天"（见 index.js 的 buildTipPrompt）。
           done: String(snap.completedFocus),
@@ -1437,10 +1507,10 @@ window.__ModuleLoader__.load({
       // 大气泡则是它的**兄弟**节点（位置参考系是整帧浮层，与可拖动的时钟不同）。
       // 两者都是自身大小，浮层其余部分照旧点击穿透。
       const tipDot = breakPhase !== null && tipDismissed
-        ? h(TipDot, { snap, t, onExpand: () => setTipDismissed(false) })
+        ? h(TipDot, { snap, t, innerRef: tipDotRef, onExpand: () => setTipDismissed(false) })
         : null
       const tipBubble = breakPhase !== null && !tipDismissed
-        ? h(BreakTip, { snap, t, sentence: tipSentence, onDismiss: () => setTipDismissed(true) })
+        ? h(BreakTip, { snap, t, sentence: tipSentence, onDismiss: dismissTip })
         : null
 
       if (ui.collapsed) {

@@ -3,9 +3,11 @@
 //   node test/tip.test.mjs
 //
 // 这里测纯函数（prompt 构造、输出清洗与长度校验、同源判定），以及注入了假 llm 的生成编排：
-// 以上都无网络、无副作用。HTTP 路由本体的状态/响应头映射不进这里（它靠 Task 4 的实机验证）；
-// 唯一的例外是最后一组「catch-all 留痕」——它用假 ctx 装载真实的 apply/handleTip，只为钉住
-// 「未预料异常也必须有痕」这一条不变量。
+// 以上都无网络、无副作用。HTTP 路由本体的状态/响应头映射**也在这里**（最后一组用假 ctx 装载
+// 真实的 apply/handleTip、驱动真实 handler）：200 + {"text"} + no-store、五条 204 出口、以及
+// handler 未预料异常的 204 + 留痕。这一层原先只靠仓库外的两个临时 harness（其中一个还断言着
+// 修复前的 prompt 文本与「请求里没有 reasoningEffort」），于是重写 handleTip 可以带着全绿的
+// node --run test 把整个功能改坏——整支评审的 Finding 1。
 // 做法与 test/model.test.mjs 一致：一个 check() 帮手 + 末尾按失败数决定退出码，方便后续任务顺序追加。
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -27,6 +29,22 @@ function check(ok, label, detail = '') {
 }
 function group(title) {
   console.log(`\n=== ${title} ===`)
+}
+
+/**
+ * 等一个**只能靠 AbortSignal.timeout 才会结束**的 promise。
+ *
+ * Node 给 `AbortSignal.timeout()` 的计时器是 **unref** 的：测试进程若只剩它在等，事件循环空转、
+ * 进程直接退出，症状是 `Detected unsettled top-level await`（看起来像挂了，其实是「没东西可跑」）。
+ * 这个帮手在等待期间挂一个 ref 的 interval 把循环撑住，拿到结果就清掉——被测逻辑一点没改。
+ */
+async function awaitWithRef(promise) {
+  const timer = setInterval(() => {}, 10)
+  try {
+    return await promise
+  } finally {
+    clearInterval(timer)
+  }
 }
 
 // ------------------------------------------------------------ prompt 构造
@@ -319,6 +337,22 @@ group('修复轮 2：码点上限按语言宽度分（zh 30 / en 60），英文�
   assert.equal(validateTip('一'.repeat(12), 'zh'), true)
   assert.equal(validateTip('一'.repeat(20), 'zh'), true)
   check(true, '中文 system 写的 12–20 个汉字落在校验器的 6–24 内（两端都过）', zhBound[0])
+
+  // 修复轮 6（Finding 7）：中文的 30 码点上限原先**只在校验器里**，system 一个字没提，而注释
+  // 却在说「每一条长度界都要写进 prompt」——注释替代码吹了牛，中文路径还留着「按 prompt 生成
+  // 的句子被自己的校验器拒掉」这个缺陷类的最后一点残渣（汉字数合规、标点一多就超 30）。
+  // 补的是 system，不是放宽校验器。照样从 system 里抠数字，再拿它当界线翻两面：
+  // 恰好 30 码点必须过，31 必须拒——抠出来的数字与校验器的判决在同一条线上。
+  const zhCharBound = zhSystem.match(/(\d+) 个字符/)
+  assert.ok(zhCharBound, '中文 system 必须写出码点上限（不说出来，注释里那句不变量就是假的）')
+  const zhCap = Number(zhCharBound[1])
+  const atCap = '一'.repeat(20) + '，'.repeat(zhCap - 20)
+  const overCap = '一'.repeat(20) + '，'.repeat(zhCap - 20 + 1)
+  assert.equal([...atCap].length, zhCap)
+  assert.equal(validateTip(atCap, 'zh'), true)
+  assert.equal(validateTip(overCap, 'zh'), false)
+  check(true, `中文 system 也写出码点上限，且界处判决一致（${zhCap} 码点 → true，${zhCap + 1} → false）`,
+    zhCharBound[0])
 }
 
 // ------------------------------------------------------------ 修复轮 3
@@ -461,8 +495,11 @@ group('生成编排 resolveTip：注入假 llm，覆盖全部失败路径')
   assert.equal(called, false)
   check(true, '外部 signal 已 abort → null，且一次模型调用都不发起', `stream 被调用：${called}`)
 
-  // 生成中途用户切走：正文已攒全、finish 也是 stop，但 signal 已 abort → 仍然丢弃
+  // 生成中途用户切走：正文已攒全、finish 也是 stop，但 signal 已 abort → 仍然丢弃。
+  // 顺带钉住**分类**（Finding 2）：读 chunk 时发现 abort，短码必须是 client-abort，
+  // 不能混成 timeout（用户切走与我们自己的期限是两条不同的排查线索）。
   const acMid = new AbortController()
+  const midReasons = []
   const midway = {
     stream: async function* () {
       yield { type: 'text-delta', text: '去接一杯水吧' }
@@ -470,16 +507,18 @@ group('生成编排 resolveTip：注入假 llm，覆盖全部失败路径')
       yield { type: 'finish', reason: { kind: 'stop' } }
     },
   }
-  assert.equal(await resolveTip(deps(midway, { signal: acMid.signal }), input), null)
-  check(true, '生成中途 abort → 正文再合规也不采纳（用户切走后不再替换气泡）', 'chunk 之间 abort')
+  assert.equal(await resolveTip(deps(midway, { signal: acMid.signal, onFailure: (r) => midReasons.push(r) }), input), null)
+  assert.deepEqual(midReasons, ['client-abort'])
+  check(true, '生成中途 abort → 正文再合规也不采纳，且短码是 client-abort', 'chunk 之间 abort')
 
   // 不真等 3 秒测内部超时（那会让整个用例慢 3 秒，真实超时由 Task 4 实机验证覆盖）。
   // 这里能观测的是两件事，合起来足以排除两种单取一边的实现：
   //   (a) 传进模型的 signal 不是外部那个对象本身 —— 「只用外部 signal」的实现会把 deps.signal
   //       原样传下去，过不了；
   //   (b) 外部 abort 后它立刻跟着 abort —— 「只用内部超时」的实现过不了。
-  // 剩下「内部 3 秒超时确实也在合并里」这一半无法在单测里便宜地观测（要真等 3 秒），
-  // 由 Task 4 的实机验证覆盖。
+  // 「内部期限确实也在合并里」这另一半原先说「要真等 3 秒、测不了」，所以只由实机覆盖——
+  // 那个借口在本轮失效了：deps.timeoutMs 是给测试留的接缝（生产不传，仍是 3000），
+  // 下面几条把它按 50ms 跑一遍（含「适配器用 reject 兑现 signal」这个 Finding 2 的现场）。
   const acAny = new AbortController()
   let seen = null
   const captor = {
@@ -498,10 +537,88 @@ group('生成编排 resolveTip：注入假 llm，覆盖全部失败路径')
   check(true, 'deps.signal 与内部超时合并（AbortSignal.any）：传给模型的不是外部 signal 本身，且随外部 abort',
     `同一对象 ${seen.signal === acAny.signal}，abort 前 ${abortedBefore} → abort 后 ${seen.signal.aborted}`)
 
+  // ---- 内部期限可注入 + abort 引起的失败按 signal 归类（Finding 1 的接缝 / Finding 2）----
+  //
+  // 一个「挂住直到 signal abort」的适配器：它**用 reject 兑现 signal**——这是合理契约，也是
+  // 实机那次 3016ms 超时的等价物。修复前这类失败走 catch 分支记 iteration-threw，README 的
+  // 失败矩阵却写着 timeout，读排查指引的人会去查一个并不存在的网络故障。
+  const hangUntilAbort = {
+    stream: (o) => (async function* () {
+      await new Promise((resolve, reject) => {
+        if (o.signal.aborted) reject(new Error('aborted'))
+        else o.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
+      })
+    })(),
+  }
+
+  // (1) 内部期限真的会砍掉慢调用：50ms 的期限、挂住的适配器 → null + 短码 timeout，且确实等到了期限。
+  const slowReasons = []
+  const slowStart = Date.now()
+  const slowVerdict = await awaitWithRef(resolveTip(deps(hangUntilAbort, { timeoutMs: 50, onFailure: (r) => slowReasons.push(r) }), input))
+  assert.equal(slowVerdict, null)
+  const slowElapsed = Date.now() - slowStart
+  assert.deepEqual(slowReasons, ['timeout'])
+  assert.ok(slowElapsed >= 45, `不该早于期限就回退（实测 ${slowElapsed}ms）`)
+  assert.ok(slowElapsed < 1500, `不该真等 3 秒（实测 ${slowElapsed}ms）`)
+  check(true, '内部期限可注入：timeoutMs=50 真的砍掉挂住的调用 → null + 短码 timeout',
+    `实测 ${slowElapsed}ms，短码 ${slowReasons.join('/')}`)
+
+  // (2) 同一条 catch 分支里，外部 abort 引起的 reject 必须记 client-abort（不是 timeout、
+  //     更不是 iteration-threw）：两种取消共用合并 signal，靠 clientSignal 区分。
+  const acSlow = new AbortController()
+  const clientReasons = []
+  const pendingClient = resolveTip(
+    deps(hangUntilAbort, { signal: acSlow.signal, timeoutMs: 3000, onFailure: (r) => clientReasons.push(r) }),
+    input,
+  )
+  setTimeout(() => acSlow.abort(), 20)
+  assert.equal(await pendingClient, null)
+  assert.deepEqual(clientReasons, ['client-abort'])
+  check(true, '适配器用 reject 兑现外部取消 → 短码 client-abort（不是 iteration-threw / timeout）',
+    '20ms 后 abort，实测短码 ' + clientReasons.join('/'))
+
+  // (3) 另一条 abort 出口：流因 abort 干净结束、但没有 finish 块。修复前这里记 no-finish，
+  //     读日志的人会以为是「流被截断」——其实真实原因是期限到了。
+  const endOnAbort = {
+    stream: (o) => (async function* () {
+      await new Promise((resolve) => o.signal.addEventListener('abort', resolve, { once: true }))
+      // 干净结束，一个 chunk 都不吐：没有 finish，也没有抛错
+    })(),
+  }
+  const tailReasons = []
+  const tailVerdict = await awaitWithRef(resolveTip(deps(endOnAbort, { timeoutMs: 50, onFailure: (r) => tailReasons.push(r) }), input))
+  assert.equal(tailVerdict, null)
+  assert.deepEqual(tailReasons, ['timeout'])
+  check(true, 'abort 让流提前干净结束（无 finish）→ 短码 timeout，不是 no-finish', tailReasons.join('/'))
+
+  // (4) 生产默认必须还是 3000ms：不传 timeoutMs 时同一个挂住的适配器不会在 100ms 内回退
+  //     （接缝只给测试用，没人把它接到生产上）；随后用外部 signal 收尾，否则它会挂满 3 秒。
+  const acDefault = new AbortController()
+  const defaultReasons = []
+  const pendingDefault = resolveTip(
+    deps(hangUntilAbort, { signal: acDefault.signal, onFailure: (r) => defaultReasons.push(r) }),
+    input,
+  )
+  const raced = await Promise.race([
+    pendingDefault.then(() => 'settled'),
+    new Promise((resolve) => setTimeout(() => resolve('still-pending'), 100)),
+  ])
+  assert.equal(raced, 'still-pending')
+  acDefault.abort()
+  assert.equal(await pendingDefault, null)
+  assert.deepEqual(defaultReasons, ['client-abort'])
+  // 源码级钉住那个数字：改它必须是有意识的（客户端 3.5 秒预算与 README 失败矩阵都引用了它）。
+  // 「生产路径没有把接缝接出去」由下面路由组那条 100ms 不回退的断言覆盖（行为级，比 grep 可靠）。
+  const hostSource = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'index.js'), 'utf8')
+  assert.match(hostSource, /const TIP_TIMEOUT_MS = 3000\b/, '生产默认必须是 3000ms')
+  check(true, '生产默认仍是 3000ms：不传 timeoutMs 时 100ms 内不回退（接缝只给测试用）',
+    `100ms 时 ${raced}`)
+
   // 请求体的形状：provider / model / system / messages / reasoningEffort / maxTokens=60 / signal 齐全，
   // 且**不得**出现 purpose（该字段只接受 compaction / session-title，没有给插件留位置）。
   // messages 里的 content 是 ContentBlock[]（真实 llm 服务的请求消息按块数组解析），
-  // 只带一个 text 块，内容正是 buildTipPrompt 的 user 串（发给模型的只有状态数字与角度）。
+  // 只带一个 text 块，内容正是 buildTipPrompt 的 user 串（发给模型的是数字与时间：状态计数、
+  // HH:MM 与角度——原注释只写「状态数字与角度」，漏了时间，见 index.js 文件头那处同批修正）。
   //
   // reasoningEffort: 'off' 是修复轮 4 加的，**这条断言就是当时的 bug**：修复前这里断言的是
   // 「请求里没有 reasoningEffort」，理由是「不传就是让适配器用自己的默认、不抬推理」。实机证伪了
@@ -557,20 +674,44 @@ group('生成编排 resolveTip：注入假 llm，覆盖全部失败路径')
   check(true, '适配器以 error 收尾（不认 reasoningEffort）→ 去掉该字段重试一次，其余字段逐字相同',
     `两次调用，第二次无 reasoningEffort，结果 ${JSON.stringify(retried)}`)
 
-  // 重试有上限：两次都 error 就到此为止，且采纳标准一点没松——第二次也必须 stop 才算数
-  let bothCalls = 0
-  const alwaysError = {
+  // 重试有上限：两次都因「不认 reasoningEffort」收尾就到此为止，且采纳标准一点没松——
+  // 第二次也必须 stop 才算数。
+  let unsupportedCalls = 0
+  const alwaysUnsupported = {
     stream: () => {
-      bothCalls += 1
+      unsupportedCalls += 1
       return (async function* () {
-        yield { type: 'finish', reason: { kind: 'error', failure: { message: 'x', code: 'BOOM' } } }
+        yield { type: 'finish', reason: { kind: 'error', failure: { message: 'x', code: 'UNSUPPORTED_REASONING_EFFORT' } } }
       })()
     },
   }
-  assert.equal(await resolveTip(deps(alwaysError), input), null)
-  assert.equal(bothCalls, 2)
-  check(true, '两次都以 error 收尾 → null，且只发两次调用（重试有上限，不无限重试）',
-    `stream 被调用 ${bothCalls} 次`)
+  assert.equal(await resolveTip(deps(alwaysUnsupported), input), null)
+  assert.equal(unsupportedCalls, 2)
+  check(true, '两次都以 UNSUPPORTED_REASONING_EFFORT 收尾 → null，且只发两次调用（重试上限两次）',
+    `stream 被调用 ${unsupportedCalls} 次`)
+
+  // Finding 5：重试条件收窄成**显式白名单**，不再「任何 error 都重试」。表外的终止性失败
+  // 一次都不重试——auth / 额度 / 限流失败换一份请求体照样失败，第二枪只是再发一次**真实且计费**
+  // 的请求。修复前这里是 `attempt.errorCode !== undefined`，上面那个 BOOM 就会打第二枪。
+  // 逐条钉住：每个码都只发一次调用（这也是本轮唯一能证明「收窄了」的断言）。
+  const nonRetryable = ['ACCOUNT_SIGN_IN_REQUIRED', 'RATE_LIMIT', 'QUOTA_EXCEEDED', 'NO_ADAPTER', 'BOOM']
+  const nonRetryCalls = []
+  for (const code of nonRetryable) {
+    let calls = 0
+    const failing = {
+      stream: () => {
+        calls += 1
+        return (async function* () {
+          yield { type: 'finish', reason: { kind: 'error', failure: { message: 'x', code } } }
+        })()
+      },
+    }
+    assert.equal(await resolveTip(deps(failing), input), null)
+    nonRetryCalls.push(calls)
+  }
+  assert.deepEqual(nonRetryCalls, nonRetryable.map(() => 1))
+  check(true, '表外的 error 一律不重试（auth / 额度 / 限流 / 无适配器各只发一次调用，不白烧第二次请求）',
+    nonRetryable.join(' / '))
 
   // max-tokens / aborted 不触发重试：去掉 reasoningEffort 只会让推理回来（更糟），取消则重试无意义
   for (const kind of ['max-tokens', 'aborted']) {
@@ -598,9 +739,9 @@ group('生成编排 resolveTip：注入假 llm，覆盖全部失败路径')
   assert.equal(await resolveTip(noting(okLlm(textChunks('去接一杯水吧')), { signal: acReason.signal }), input), null)
   assert.deepEqual(reasons, ['no-llm', 'rejected:0cp/0han', 'no-finish', 'client-abort'])
   reasons.length = 0
-  assert.equal(await resolveTip(noting(alwaysError), input), null)
+  assert.equal(await resolveTip(noting(alwaysUnsupported), input), null)
   // 重试的两次尝试**只记最后那一条**：一次请求一行日志，不是一次尝试一行
-  assert.deepEqual(reasons, ['error:BOOM'])
+  assert.deepEqual(reasons, ['error:UNSUPPORTED_REASONING_EFFORT'])
   assert.equal(await resolveTip(noting(okLlm([]), { onFailure: () => { throw new Error('log broken') } }), input), null)
   check(true, 'onFailure 覆盖每条失败出口（短码含适配器失败码），钩子抛错也不影响返回 null',
     reasons.concat('log broken → 仍 null').join(' / '))
@@ -641,18 +782,18 @@ group('同源检查 isSameOrigin')
   check(true, '无法解析的 Origin（含 "null"、缺 scheme）拒绝且不抛异常', 'null / :// / localhost:52341')
 }
 
-// ------------------------------------------------------------ catch-all 留痕（修复轮 5）
+// ------------------------------------------------------------ 宿主路由契约（Finding 1）
 
-group('handler 未预料异常的留痕')
+group('宿主路由契约：200 + no-store、五条 204 出口、handler-threw 留痕')
 {
-  // 为什么这条进单测：本路由对外只有 200 与 204 两种结果，**204 与「插件坏了 / 路由没注册」
-  // 完全同形**，唯一的分辨手段就是宿主日志里那一行短码（见 index.js 文件头与 logTipFailure）。
-  // 修复前的 catch 是 `if (!res.headersSent) noContent(res)`：resolveTip 之外的任何异常——抛错的
-  // ctx.get / currentSelection()、将来在 writeHead 之前引入的回归——都静默 204，读文件头那句
-  // 排查指引的人只会去查「路由是不是没注册」，而路由恰恰是注册着的。
+  // 这一组为什么必须存在：`/pomodoro/tip` 是本功能**唯一对外可见**的表面，它的契约表就写在
+  // README 的「失败矩阵」里。在这之前，状态码与响应头映射只有**仓库外**的两个临时 harness
+  // 覆盖，其中一个还断言着修复前的 prompt 文本与「请求里没有 reasoningEffort」——也就是说
+  // handleTip 被重写、整个功能坏掉，`node --run test` 照样全绿。
   //
-  // 这里用假 ctx 装载**真实的** apply/handleTip，把异常放进 resolveTip 之外。只钉这一条不变量；
-  // handler 的状态码与响应头映射仍由实机验证覆盖（轻量假 ctx 不适合当那部分的契约测试）。
+  // 这里用假 ctx / 假 req / 假 res 装载**真实的** apply 与 handleTip（同一个加载器沿用了
+  // 修复轮 5 那两条留痕断言）。覆盖不到的部分说清楚：假 res 只记录 writeHead 的状态与响应头、
+  // end 的正文；真实 socket 的行为（客户端中途断开、res 已 destroy 后再写 204）仍靠实机验证。
   function loadTipRoute(get, { loggerThrows = false } = {}) {
     const routes = []
     const logs = []
@@ -672,19 +813,51 @@ group('handler 未预料异常的留痕')
     return { route: routes.at(-1), logs }
   }
 
-  const req = {
-    headers: { host: 'localhost:52341' },
-    url: '/pomodoro/tip?phase=short&round=3&done=7&angle=water&lang=zh',
-    on() {},
+  /** 假 llm：数得清调用次数，默认吐一句能过校验的正文并以 stop 收尾。 */
+  function fakeLlm(chunks = [{ type: 'text-delta', text: '去接一杯水吧' }, { type: 'finish', reason: { kind: 'stop' } }]) {
+    const calls = []
+    return {
+      calls,
+      stream(request) {
+        calls.push(request)
+        return (async function* () { for (const chunk of chunks) yield chunk })()
+      },
+    }
   }
+
+  /** 一份标准假 ctx.get：llm 与 agentDefaultModel 都在；overrides 里显式给 undefined 就是缺席。 */
+  function services(overrides = {}) {
+    const table = {
+      llm: fakeLlm(),
+      agentDefaultModel: { currentSelection: () => ({ provider: 'p', model: 'm' }) },
+      ...overrides,
+    }
+    // 返回的 llm 是**生效的那个**（overrides 换掉它时也要跟着换），调用次数断言才落在真身上。
+    return { llm: table.llm, get: (name) => table[name] }
+  }
+
+  const GOOD_QUERY = 'phase=short&round=3&done=7&angle=water&lang=zh'
+  const makeReq = (search, headers = {}) => ({
+    headers: { host: 'localhost:52341', ...headers },
+    url: `/pomodoro/tip?${search}`,
+    on() {},
+  })
+
+  /** 假 res：writeHead 的状态与响应头、end 的正文都记下来；body 为 undefined 即「空体」。 */
   function fakeRes() {
     const res = {
       status: null,
+      headers: null,
       headersSent: false,
       body: undefined,
-      writeHead(status) { res.status = status; res.headersSent = true },
+      writeHead(status, headers) { res.status = status; res.headers = headers ?? null; res.headersSent = true },
       end(body) { res.body = body },
     }
+    return res
+  }
+  async function call(route, req) {
+    const res = fakeRes()
+    await route.handler(req, res)
     return res
   }
 
@@ -694,30 +867,175 @@ group('handler 未预料异常的留痕')
   // 免得测试输出里混进一行看起来像失败的 warn。末尾 finally 还原。
   console.warn = (message) => warned.push(message)
   try {
-    // (1) ctx.get 抛错（resolveTip 之外的最短路径）→ 204 空体，且**两个日志出口各写同一行**
+    // ---- 1. 正常路径：200 + {"text":…} + cache-control: no-store ----
+    const ok = services()
+    const okRoute = loadTipRoute(ok.get)
+    assert.equal(okRoute.route.path, '/pomodoro/tip')
+    assert.equal(okRoute.route.kind, 'exact')
+    const res200 = await call(okRoute.route, makeReq(GOOD_QUERY))
+    assert.equal(res200.status, 200)
+    assert.equal(typeof res200.body, 'string')
+    assert.deepEqual(JSON.parse(res200.body), { text: '去接一杯水吧' })
+    assert.equal(res200.headers['cache-control'], 'no-store')
+    assert.equal(res200.headers['content-type'], 'application/json; charset=utf-8')
+    assert.equal(ok.llm.calls.length, 1)
+    assert.equal(okRoute.logs.length, 0)
+    assert.equal(warned.length, 0)
+    check(true, '正常路径：200 + {"text":…} + cache-control: no-store，且不写日志（本功能唯一的对外成功面）',
+      `${res200.status} ${res200.body} / ${res200.headers['cache-control']}`)
+
+    // ---- 2. 204 出口之一：跨站 Origin（连 query 都不看、更不碰模型）----
+    const cross = services()
+    const crossRoute = loadTipRoute(cross.get)
+    const resCross = await call(crossRoute.route, makeReq(GOOD_QUERY, { origin: 'http://evil.example' }))
+    assert.equal(resCross.status, 204)
+    assert.equal(resCross.body, undefined)
+    assert.equal(resCross.headers['cache-control'], 'no-store')
+    assert.equal(resCross.headers['content-type'], undefined)
+    assert.equal(cross.llm.calls.length, 0)
+    assert.equal(crossRoute.logs.length, 0)
+    check(true, '跨站 Origin → 204 空体 + no-store，不碰模型、不写日志（调用方自己的问题）',
+      `${resCross.status} / 模型调用 ${cross.llm.calls.length} 次`)
+
+    // ---- 3. 204 出口之二：非法 query（round / done 缺席、空串、非数字、非整数、负数）----
+    //         Finding 4 的两条（1.5 / -3）与溢出（Infinity）都在这里，逐条都是 204 + 空体，
+    //         而且**一次模型调用都不该发生**——这是「不替调用方圆场」的严格策略的本体。
+    const badQueries = [
+      ['round=abc&done=7', 'round 非数字'],
+      ['round=abc', 'round 非数字且缺 done'],
+      ['round=3', '缺 done'],
+      ['round=3&done=', 'done 空串'],
+      ['round=3&done=abc', 'done 非数字'],
+      ['round=1.5&done=7', 'round 小数（Finding 4）'],
+      ['round=-3&done=7', 'round 负数（Finding 4）'],
+      ['round=3&done=-1', 'done 负数（Finding 4）'],
+      ['round=3&done=1e999', 'done 溢出成 Infinity'],
+      ['round=3&done=99999999999999999999', 'done 超出安全整数范围'],
+    ]
+    const badVerdicts = []
+    for (const [search] of badQueries) {
+      const s = services()
+      const res = await call(loadTipRoute(s.get).route, makeReq(search))
+      assert.equal(res.status, 204)
+      assert.equal(res.body, undefined)
+      assert.equal(res.headers['cache-control'], 'no-store')
+      assert.equal(s.llm.calls.length, 0)
+      badVerdicts.push(res.status)
+    }
+    check(true, '非法 query（缺席 / 空串 / 非数字 / 小数 / 负数 / 溢出）→ 每个都是 204 空体，一次模型调用都不发生',
+      badQueries.map(([q, why]) => `${q}（${why}）`).join('；'))
+
+    // ---- 4. 204 出口之三：拿不到 llm 服务（第一道降级，早于任何超时与 I/O）----
+    const noLlm = services({ llm: undefined })
+    const noLlmRoute = loadTipRoute(noLlm.get)
+    const resNoLlm = await call(noLlmRoute.route, makeReq(GOOD_QUERY))
+    assert.equal(resNoLlm.status, 204)
+    assert.equal(resNoLlm.body, undefined)
+    assert.equal(resNoLlm.headers['cache-control'], 'no-store')
+    assert.equal(noLlmRoute.logs.length, 1)
+    assert.ok(noLlmRoute.logs[0].includes('no-service:llm'))
+    assert.equal(noLlmRoute.logs[0], warned.at(-1))
+    check(true, 'llm 服务缺席 → 204 空体 + 日志 no-service:llm（两个日志出口同一行）', noLlmRoute.logs[0])
+
+    // ---- 5. 204 出口之四：没配默认模型（服务缺席，或 currentSelection() 返回 null）----
+    for (const [label, overrides] of [
+      ['agentDefaultModel 缺席', { agentDefaultModel: undefined }],
+      ['currentSelection() 返回 null', { agentDefaultModel: { currentSelection: () => null } }],
+    ]) {
+      const s = services(overrides)
+      const route = loadTipRoute(s.get)
+      const res = await call(route.route, makeReq(GOOD_QUERY))
+      assert.equal(res.status, 204)
+      assert.equal(res.body, undefined)
+      assert.equal(route.logs.length, 1)
+      assert.ok(route.logs[0].includes('no-service:agentDefaultModel'))
+      assert.equal(s.llm.calls.length, 0)
+    }
+    check(true, '默认模型缺席（服务 undefined 或 currentSelection() 为 null）→ 204 + no-service:agentDefaultModel，不碰模型',
+      'profile 没配默认模型是最可能的静默失败，这条留痕就是为它写的')
+
+    // ---- 6. 204 出口之五：resolveTip → null（输入合法，句子没生成出来）----
+    //         这里挑「流没有终止块」当代表；resolveTip 的其余失败出口已在上一组逐条覆盖。
+    //         状态码与日志短码必须在**同一条**路径上对得上。
+    const broken = services({ llm: fakeLlm([]) })
+    const brokenRoute = loadTipRoute(broken.get)
+    const resBroken = await call(brokenRoute.route, makeReq(GOOD_QUERY))
+    assert.equal(resBroken.status, 204)
+    assert.equal(resBroken.body, undefined)
+    assert.equal(resBroken.headers['cache-control'], 'no-store')
+    assert.equal(broken.llm.calls.length, 1)
+    assert.equal(brokenRoute.logs.length, 1)
+    assert.ok(brokenRoute.logs[0].includes('no-finish'))
+    check(true, 'resolveTip 返回 null（流没有终止块）→ 204 空体 + 日志 no-finish（200 之外的唯一出口）',
+      brokenRoute.logs[0])
+
+    // ---- 8. 真实 handler 的期限与「客户端断开」接线 ----
+    //     llm 挂住直到 signal abort（适配器用 reject 兑现 signal，见 Finding 2 的现场）。
+    //     两件事一起钉：① 生产路径没把 timeoutMs 接缝接出去——真实 handler 100ms 内绝不回退；
+    //     ② req 的 'close' 真的接到了 controller 上——断开后立刻 204 + client-abort，而不是挂满 3 秒。
+    const hangCalls = []
+    const hangLlm = {
+      stream(request) {
+        hangCalls.push(request)
+        return (async function* () {
+          await new Promise((resolve, reject) => {
+            if (request.signal.aborted) reject(new Error('aborted'))
+            else request.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
+          })
+        })()
+      },
+    }
+    let closeHandler = null
+    const hangReq = {
+      headers: { host: 'localhost:52341' },
+      url: `/pomodoro/tip?${GOOD_QUERY}`,
+      on(event, listener) { if (event === 'close') closeHandler = listener },
+    }
+    const hangSvc = services({ llm: hangLlm })
+    const hangRoute = loadTipRoute(hangSvc.get)
+    const hangRes = fakeRes()
+    const pendingRoute = hangRoute.route.handler(hangReq, hangRes)
+    const stillPending = await Promise.race([
+      pendingRoute.then(() => 'settled'),
+      new Promise((resolve) => setTimeout(() => resolve('still-pending'), 100)),
+    ])
+    assert.equal(stillPending, 'still-pending')
+    assert.equal(typeof closeHandler, 'function')
+    assert.equal(hangCalls.length, 1)
+    closeHandler() // 客户端断开（切走 / 关页面）
+    await pendingRoute
+    assert.equal(hangRes.status, 204)
+    assert.equal(hangRes.body, undefined)
+    assert.equal(hangRoute.logs.length, 1)
+    assert.ok(hangRoute.logs[0].includes('client-abort'))
+    check(true, '真实 handler：100ms 内不回退（生产不接 timeoutMs 接缝），req close 后立刻 204 + client-abort',
+      `100ms 时 ${stillPending}；断开后 ${hangRoute.logs[0]}`)
+
+    // ---- 9. handler-threw：resolveTip 之外的未预料异常也必须有痕 ----
+    //     本路由对外只有 200 与 204 两种结果，**204 与「插件坏了 / 路由没注册」完全同形**，
+    //     唯一的分辨手段就是日志里那一行短码。修复前的 catch 是 `if (!res.headersSent)
+    //     noContent(res)`：抛错的 ctx.get / currentSelection()、将来在 writeHead 之前引入的
+    //     回归，全都静默 204，读文件头那句排查指引的人只会去查「路由是不是没注册」。
     const boomGet = loadTipRoute(() => { throw new Error('ctx.get 炸了') })
     assert.equal(boomGet.route.path, '/pomodoro/tip')
-    const res1 = fakeRes()
-    await boomGet.route.handler(req, res1)
-    assert.equal(res1.status, 204)
-    assert.equal(res1.body, undefined)
+    const resThrow = await call(boomGet.route, makeReq(GOOD_QUERY))
+    assert.equal(resThrow.status, 204)
+    assert.equal(resThrow.body, undefined)
     assert.equal(boomGet.logs.length, 1)
-    assert.equal(warned.length, 1)
     assert.ok(boomGet.logs[0].includes('handler-threw'))
-    assert.equal(boomGet.logs[0], warned[0])
+    assert.equal(boomGet.logs[0], warned.at(-1))
     check(true, 'handler 在 resolveTip 之外抛错 → 204 空体 + 一行短码（修复前完全静默）', boomGet.logs[0])
 
-    // (2) 换一个抛点（currentSelection()），并让两个日志出口同时坏掉 → 出口仍是 204 空体。
-    //     留痕只能「加一行」，不许改变状态决定，也不许把异常泄成 500。
+    // 换一个抛点（currentSelection()），并让两个日志出口同时坏掉 → 出口仍是 204 空体。
+    // 留痕只能「加一行」，不许改变状态决定，也不许把异常泄成 500。
     const badSelection = loadTipRoute(
       (name) => (name === 'llm' ? {} : { currentSelection() { throw new Error('selection 炸了') } }),
       { loggerThrows: true },
     )
     console.warn = () => { throw new Error('console.warn broken') }
-    const res2 = fakeRes()
-    await badSelection.route.handler(req, res2)
-    assert.equal(res2.status, 204)
-    assert.equal(res2.body, undefined)
+    const resBrokenLog = await call(badSelection.route, makeReq(GOOD_QUERY))
+    assert.equal(resBrokenLog.status, 204)
+    assert.equal(resBrokenLog.body, undefined)
     assert.equal(badSelection.logs.length, 0)
     check(true, 'currentSelection() 抛错且两个日志出口都坏掉 → 仍然 204 空体（留痕不参与状态决定）',
       'logger.warn 与 console.warn 都抛')
@@ -825,6 +1143,84 @@ group('迷你圆盘的按键归属 miniRootKeyDown（标记切片）')
   assert.equal(miniRootKeyDown(onOther, () => { throw new Error('不该被调用') }), false)
   assert.equal(onOther.defaultPrevented, false)
   check(true, '其它按键一概不管（不 preventDefault、不展开）', "key='a'")
+}
+
+// ------------------------------------------------------------ ✕ 的键盘激活判定（修复轮 6 / Finding 6）
+
+// 键盘激活 ✕ 收成小圆点后，被激活的按钮随气泡一起卸载，焦点掉回 document.body；剩下唯一的控件
+// 是那个 30px 小圆点，键盘用户得从文档开头重新 Tab 一整圈——在一个 README 明说「键盘可达」的
+// 插件里这是退步。修复只在**键盘激活**时把焦点交给小圆点（鼠标点击不动焦点，与「不抢输入焦点」
+// 一致），判定提成 tipCloseFromKeyboard 用同一套标记切片法钉住。
+//
+// 覆盖范围：同 miniRootKeyDown，这里钉的是**判定本身**（detail === 0 才算键盘），不是组件里
+// 「谁调它、把 ref 接到哪个节点」的接线——后者要真实渲染，由未入库的临时冒烟脚本覆盖（见 README
+// 「验证状态」；本轮把那个脚本的 ✕ 用例也补上了键盘路径，结果记在 final-fix-report.md）。
+function loadClientTipFocus() {
+  const start = clientSource.indexOf('// --- tip-focus:start ---')
+  const end = clientSource.indexOf('// --- tip-focus:end ---', start)
+  if (start < 0 || end < 0) throw new Error('切片失败: // --- tip-focus:start --- .. // --- tip-focus:end ---')
+  const slice = clientSource.slice(start, end)
+  return new Function(`${slice}\nreturn { tipCloseFromKeyboard }`)()
+}
+
+group('气泡 ✕ 的键盘激活判定 tipCloseFromKeyboard（标记切片）')
+{
+  const { tipCloseFromKeyboard } = loadClientTipFocus()
+
+  // 键盘（Enter / 空格）与辅助技术合成的 click：detail === 0 → 收起后把焦点交给小圆点
+  assert.equal(tipCloseFromKeyboard({ detail: 0 }), true)
+  check(true, '键盘激活的 click（detail === 0）→ 收起后把焦点交给小圆点',
+    'Enter / 空格在 button 上的 click 都是 detail 0')
+
+  // 真实指针点击：detail 是点击计数（≥1）→ 不动焦点，焦点留在用户原来编辑的地方
+  assert.equal(tipCloseFromKeyboard({ detail: 1 }), false)
+  assert.equal(tipCloseFromKeyboard({ detail: 2 }), false)
+  check(true, '鼠标点击（detail ≥ 1）→ 不动焦点（「不抢输入焦点」在这一侧继续成立）',
+    'detail 1 / 2 → false')
+
+  // 拿不准就不动焦点：没有 detail 字段的合成事件按「不是键盘」处理，宁可少一次搬运，也不误抢
+  assert.equal(tipCloseFromKeyboard({}), false)
+  assert.equal(tipCloseFromKeyboard(undefined), false)
+  check(true, 'detail 缺失 / 事件对象缺失 → 不动焦点（不猜）', '{} / undefined → false')
+}
+
+// ------------------------------------------------------------ round 参数：0 钳成 1（修复轮 6 / Finding 3）
+
+// cycleFocus 为 0 的四种状态（开机、长休息结束回到专注、长休息中途切到专注、清除统计之后）
+// 都能靠**点一下「短休息」胶囊**到达。宿主接受 0（0 是合法整数，不会 204），于是 prompt 会真写出
+// 「本轮第 0 个番茄」——假前提。宿主那边的严格策略有意不放松（见 index.js 的 parseCount），
+// 所以钳制在客户端：tipRoundParam。这里钉住钳制函数本身，并反向钉住「为什么必须在客户端钳」。
+function loadClientTipRound() {
+  const start = clientSource.indexOf('// --- tip-round:start ---')
+  const end = clientSource.indexOf('// --- tip-round:end ---', start)
+  if (start < 0 || end < 0) throw new Error('切片失败: // --- tip-round:start --- .. // --- tip-round:end ---')
+  const slice = clientSource.slice(start, end)
+  return new Function(`${slice}\nreturn { tipRoundParam }`)()
+}
+
+group('客户端 round 参数 tipRoundParam：0 钳成 1（标记切片）')
+{
+  const { tipRoundParam } = loadClientTipRound()
+
+  // 四种 0 状态都走同一个函数，所以一条断言就够：0 → '1'
+  assert.equal(tipRoundParam(0), '1')
+  check(true, 'cycleFocus=0（开机 / 长休息结束回专注 / 长休息中途切专注 / 清除统计后）→ round=1',
+    '0 → "1"（修复前发的是 "0"）')
+
+  // 非 0 的取值原样透传（修复不许把正常的轮次也改了）
+  assert.equal(tipRoundParam(1), '1')
+  assert.equal(tipRoundParam(2), '2')
+  assert.equal(tipRoundParam(4), '4')
+  check(true, '正常的周期位置原样透传（1 / 2 / 4 → "1" / "2" / "4"）', '只有 0 被钳')
+
+  // 反向钉住「为什么必须在客户端钳」：宿主对 0 是接受的，prompt 会照写「本轮第 0 个番茄」。
+  // 也就是说宿主不会替客户端圆场 —— 这两条断言一起构成「协商好的分工」。
+  const zero = buildTipPrompt({ phase: 'short', round: 0, done: 0, now: '09:00', angle: 'water', lang: 'zh' })
+  const clamped = buildTipPrompt({ phase: 'short', round: Number(tipRoundParam(0)), done: 0, now: '09:00', angle: 'water', lang: 'zh' })
+  assert.ok(zero.user.includes('本轮第 0 个番茄'), zero.user)
+  assert.ok(clamped.user.includes('本轮第 1 个番茄'), clamped.user)
+  check(true, '宿主不替客户端圆场：round=0 会真写进 prompt（「本轮第 0 个番茄」），钳成 1 才是对的',
+    'zero → ' + zero.user.slice(0, 22) + '…')
 }
 
 // ---------------------------------------------------------------- 汇总
