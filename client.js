@@ -157,7 +157,6 @@ window.__ModuleLoader__.load({
       tip: 'dsp-pc-tip',
       tipClose: 'dsp-pc-tip-close',
       tipInner: 'dsp-pc-tip-inner',
-      tipRing: 'dsp-pc-tip-ring',
       tipTime: 'dsp-pc-tip-time',
       tipText: 'dsp-pc-tip-text',
       tipDot: 'dsp-pc-tip-dot',
@@ -224,24 +223,13 @@ window.__ModuleLoader__.load({
       // 圆盘按阶段换色：这一条只做「阶段 → token」的映射，具体色值由下面的
       // 浅色/深色两条规则提供。映射和色值分开写，是为了让深色规则只覆盖原始
       // 色值、不去碰映射变量（原因见深色那条的注释）。
-      //
-      // **调色板必须同时发给气泡**（`.dsp-pc-tip`）：气泡是时钟根节点的**兄弟**，
-      // 兄弟之间不继承自定义属性。只发给根节点时，气泡里的
-      // `--dsp-pc-ring: var(--dsp-pc-ring-short)` 会因为 `--dsp-pc-ring-short` **不存在**
-      // 而变成无效值，于是 `var(--dsp-pc-ring, 兜底)` 取兜底 —— 外环渲染成错误红。
-      // 更隐蔽的是：`--dsp-pc-ring` 与 `--dsp-pc-ring-soft` 会**同时**失效、落到同一个
-      // 兜底色，于是"已经扫过的扇形"整个消失，看上去只是一圈纯色 —— 用户实测报告就是
-      // "外环是红色、和圆盘不一致、没有扫过的扇形"，三个现象同一个原因。
-      `.${CLASS.root},.${CLASS.tip}{box-sizing:border-box;${paletteDecls('light')}}`,
-      // 阶段映射：根节点与气泡各来一条（内联样式也会写同样的值，见 TIP_PHASE_VARS）。
-      // 默认阶段（没有 data-phase 时）：映射到 focus 的色值。有 data-phase 时由下面的规则覆盖。
-      `.${CLASS.root}{--dsp-pc-ring:var(--dsp-pc-ring-focus);--dsp-pc-ring-soft:var(--dsp-pc-ring-focus-soft);--dsp-pc-dial:var(--dsp-pc-dial-focus);--dsp-pc-dial-rest:var(--dsp-pc-dial-focus-rest)}`,
+      `.${CLASS.root}{box-sizing:border-box;${paletteDecls('light')};--dsp-pc-ring:var(--dsp-pc-ring-focus);--dsp-pc-ring-soft:var(--dsp-pc-ring-focus-soft);--dsp-pc-dial:var(--dsp-pc-dial-focus);--dsp-pc-dial-rest:var(--dsp-pc-dial-focus-rest)}`,
       // 深色：**只覆盖原始色值，绝不重新声明 --dsp-pc-ring / --dsp-pc-dial**。
       // 这条选择器是 (0,2,1)，而阶段规则 `.dsp-pc-root[data-phase=…]` 是 (0,2,0)
       // —— 一旦在这里也写映射变量，深色下阶段就会被永久钉死在 focus。
       // `body[data-ds-dark-theme]` 是宿主 layout presenter 维护的暗色属性，
       // 宿主自己的主题 CSS 用的也是它。
-      `body[data-ds-dark-theme] .${CLASS.root},body[data-ds-dark-theme] .${CLASS.tip}{${paletteDecls('dark')}}`,
+      `body[data-ds-dark-theme] .${CLASS.root}{${paletteDecls('dark')}}`,
       // 阶段变量必须**同时**发给气泡：气泡和时钟根节点是**兄弟**（都直接挂在整帧浮层里），
       // 兄弟之间不继承自定义属性。早先只写给 `.dsp-pc-root`，于是气泡里 `var(--dsp-pc-ring, …)`
       // 每次都落到兜底值 —— 三个阶段全渲染成同一个颜色，且完全静默。
@@ -353,41 +341,21 @@ window.__ModuleLoader__.load({
       // 两者写在一起会互相覆盖（动画一跑，居中就没了）。
       `.${CLASS.tip}{position:absolute;left:50%;top:50%;translate:-50% -50%;`,
       `box-sizing:border-box;width:180px;height:180px;padding:9px;border-radius:50%;display:grid;place-items:center;`,
-      // **不要给气泡加 1px 描边**（曾经加过 `border:1px solid --dsw-alias-border-l1`，两个坏处）：
-      // 1) 暗色主题下它是浅色的 —— 那是个会发白的元素，"四个位置发白"的实测反馈就是它露出来的部分；
-      // 2) 有边框时**内边距盒只有 178px**，而 SVG 外环是 180px，两者错位 1px，环盖不住边框，
-      //    边框就在环没对齐的地方露出来。
-      // 环（SVG 描边）自己就是边界，不需要再描一层。
+      // `overflow:hidden` 是"看着不圆"的关键：`border-radius:50%` 只把自己的**背景**裁成圆，
+      // **管不住越界的子元素**。内盘是 162px 放在 160px 的内容盒里，会溢出 1px；而它是
+      // `position:relative`（定位元素），于是**方形地**探出圆外盖在环上 —— 圆就不圆了。
+      // 加上 `overflow:hidden`，子元素也被裁进圆里。
+      // 注意它**不会**裁掉元素自己的 `box-shadow`（投影画在盒子外），投影照常。
+      `overflow:hidden;`,
+      `border:1px solid var(--dsw-alias-border-l1);`,
+      // 外环：与圆盘的 `.dsp-pc-ring` 同一套 conic-gradient，只是尺寸不同。
+      `background:conic-gradient(var(--dsp-pc-ring,var(--dsw-alias-state-error-primary)) var(--dsp-pc-progress,0%),var(--dsp-pc-ring-soft,var(--dsw-alias-state-error-primary)) 0);`,
       `box-shadow:var(--dsw-elevation-soft,0 8px 28px rgb(0 0 0 / 16%));`,
       `animation:dsp-pc-tip-in 240ms ease-out}`,
-      // 外环改用 **SVG** 画，不用 conic-gradient。
-      //
-      // 原因：浏览器把 conic-gradient 拆成**四个象限**栅格化，四条象限边界（正上、正右、正下、
-      // 正左）会留下 1px 的接缝。9px 宽的环上，接缝横穿整条环，看起来就是"每一边中间有一小段
-      // 有颜色的线"（实测反馈）。SVG 的 `<circle>` 一次描边成形，没有象限拼接，也没有接缝。
-      // 顺带的好处：环宽就是 `stroke-width`，不必再靠 padding 反推。
-      // r=85.5、stroke-width=9 → 环占 r 81~90；内盘 r=81（162px），两者正好接上。
-      `.${CLASS.tipRing}{position:absolute;inset:0;width:180px;height:180px;display:block;pointer-events:none}`,
-      // 描边宽度与填充写进 CSS，**不靠属性**。
-      // 实测现象："四个方向中间没问题、四个角没有颜色" —— 这是**线太细/太淡**的典型特征：
-      // 笔画在正上正下正左正右是横平竖直的，渲染得清楚；到四个斜角曲线成 45°，抗锯齿把线摊到
-      // 两个像素上就淡到看不见。属性形式的 stroke-width 没生效时就是这个样子。
-      // 颜色仍由每个 circle 的 style 提供（见 BreakTip），这里只管几何。
-      `.${CLASS.tipRing} circle{fill:none;stroke-width:9}`,
-      `.${CLASS.tipRing} circle:last-child{stroke-linecap:butt}`,
       // 内盘：与圆盘的 `.dsp-pc-ring-inner` 同一套（不透明两段实色），只是里面多了那句文案。
-      // 内盘 164px（r=82）而不是 162px（r=81）：**故意往环底下压 1px**。
-      // SVG 环的内缘与内盘的外缘如果正好相接，两条抗锯齿边会叠出一道极淡的亮缝，
-      // 看上去像"环和内盘之间有个缝"。压 1px 之后这条缝被内盘盖住。
-      // 环因此显窄 1px（9 → 8 可见），肉眼无感。
-      // `position:relative` 不是为了定位，是**绘制顺序**：SVG 是绝对定位元素，绝对定位
-      // 会盖在静态元素之上。内盘不加定位就压不住环的内缘，"往环底下压 1px"那招会失效。
-      // 加上之后内盘进入定位层，DOM 里又排在 SVG 之后，于是正常盖在环上。
       // `clip-path:circle(50%)` 与 `border-radius:50%` 两个都写，是刻意的冗余：
-      // 实测"环有的地方宽 9px、四个角几乎没有宽度" = 环宽**不均匀**，这是形状问题 ——
-      // 说明内盘渲染成了**正方形**（正方形的角指向四个斜角，正好把环在那里整条盖掉，
-      // 只剩正上正下正左正右露出 9px）。`clip-path` 不依赖 `border-radius`，能强制成圆。
-      `.${CLASS.tipInner}{position:relative;width:164px;height:164px;border-radius:50%;clip-path:circle(50%);display:flex;flex-direction:column;`,
+      // border-radius 只裁背景，clip-path 连子元素和溢出一并裁掉，任何情况下都是圆的。
+      `.${CLASS.tipInner}{width:162px;height:162px;border-radius:50%;clip-path:circle(50%);display:flex;flex-direction:column;`,
       `align-items:center;justify-content:center;text-align:center;`,
       `background:conic-gradient(var(--dsp-pc-dial,var(--dsw-alias-bg-overlay)) var(--dsp-pc-progress,0%),var(--dsp-pc-dial-rest,var(--dsw-alias-bg-overlay)) 0)}`,
       `.${CLASS.tipTime}{font-size:40px;line-height:1;font-weight:600;color:var(--dsw-alias-label-primary);`,
@@ -1343,14 +1311,7 @@ window.__ModuleLoader__.load({
       },
     }
 
-    // 气泡外环的几何：半径与周长。SVG 用 dasharray/dashoffset 表示进度，周长是个常数。
-    // r = 85.5：180px 泡、9px 环 → 环中线落在 r=85.5，占 r 81~90，与 162px 内盘（r=81）严丝合缝。
-    const TIP_RING_R = 85.5
-    const TIP_RING_C = 2 * Math.PI * TIP_RING_R
-
     function BreakTip({ snap, t, sentence, onDismiss }) {
-      // 进度按 0~1 收口：NaN / 越界值都会让 dashoffset 变成无效字符串，环直接画不出来。
-      const tipPercent = Math.min(1, Math.max(0, Number(snap.progress) || 0))
       return h('div', {
         className: CLASS.tip,
         role: 'group',
@@ -1373,31 +1334,6 @@ window.__ModuleLoader__.load({
         'aria-label': t('action.dismissTip'),
         title: t('action.dismissTip'),
       }, closeIcon()),
-      // 外环：**SVG 描边**，不用 conic-gradient —— 后者在四个象限边界会留 1px 接缝，
-      // 9px 宽的环上表现为"每一边正中出现一小段有颜色的线"（实测反馈）。
-      // r=85.5、stroke-width=9 → 环占 r 81~90；内盘 162px（r=81）与之正好接上，不留缝。
-      // 进度用 dasharray/dashoffset 表达，起点靠 rotate(-90) 挪到正上方。
-      // 画在按钮与内盘**之间**：接缝没有了，但 ✕ 落在内盘范围内（距圆心约 69 < 81），不会被环压到。
-      h('svg', {
-        className: CLASS.tipRing,
-        viewBox: '0 0 180 180',
-        'aria-hidden': 'true',
-        focusable: 'false',
-      },
-      h('circle', {
-        cx: 90, cy: 90, r: TIP_RING_R, fill: 'none', strokeWidth: 9,
-        // 颜色必须走 `style`，**不能**写成 `stroke="var(--…)"` 这种 presentation attribute：
-        // 自定义属性在那类属性里支持不可靠，失效就等于不描边 —— 整圈底色轨道会整个消失，
-        // 只剩进度弧那一截，看上去"环不完整、大片没有颜色"（实测反馈）。
-        style: { stroke: 'var(--dsp-pc-ring-soft,var(--dsw-alias-state-error-primary))' },
-      }),
-      h('circle', {
-        cx: 90, cy: 90, r: TIP_RING_R, fill: 'none', strokeWidth: 9,
-        style: { stroke: 'var(--dsp-pc-ring,var(--dsw-alias-state-error-primary))' },
-        strokeDasharray: TIP_RING_C,
-        strokeDashoffset: TIP_RING_C * (1 - tipPercent),
-        transform: 'rotate(-90 90 90)',
-      })),
       // 内盘：与圆盘同构，只在读数下面多接一句提醒。**不再显示阶段名** —— 圆盘本来就没有，
       // 阶段由环的颜色表达；重复写一个名字正是"挤"和"不好看"的来源。
       h('div', { className: CLASS.tipInner },
