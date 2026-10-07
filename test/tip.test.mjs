@@ -43,9 +43,10 @@ group('角度表与 prompt 构造')
   const en = buildTipPrompt({ phase: 'long', round: 4, done: 7, now: '15:20', angle: 'distance', lang: 'en' })
   assert.ok(!/[\u4e00-\u9fff]/.test(en.user))
   assert.ok(en.user.toLowerCase().includes('distance'))
-  // 英文用词数：必须与 Task 2 校验器的 3–8 词一致，否则生成的句子会被自己的校验器拒掉
-  assert.ok(/words/i.test(en.system) && !/characters/i.test(en.system))
-  check(true, '英文 user 全英文且含 distance 子句，system 用"词"约束长度', en.user)
+  // 英文长度界有两条，prompt 必须都说出来：词数 3–8，以及字符预算 60（码点上限是宽度兜底）。
+  // 只说词数时，一句 7 词、63 码点的回答按 prompt 合规、却被上限拒——那正是第 3 轮修掉的不变量缺口。
+  assert.ok(/words/i.test(en.system) && /characters/i.test(en.system))
+  check(true, '英文 user 全英文且含 distance 子句，system 同时用"词数"与"字符预算"约束长度', en.user)
 
   // 断言 4：五个角度都能映射出非空子句，且互不相同
   const clauses = TIP_ANGLES.map((a) => buildTipPrompt({ phase: 'short', round: 1, done: 1, now: '09:00', angle: a, lang: 'zh' }).user)
@@ -289,12 +290,53 @@ group('修复轮 2：码点上限按语言宽度分（zh 30 / en 60），英文�
   assert.equal(validateTip(Array.from({ length: 9 }, () => 'a').join(' '), 'en'), false)
   check(true, '英文 system 写的 3–8 词 = 校验器的 3–8 词（词数界处判决一致）', enBound[0])
 
+  // 修复轮 3（Finding 1）：码点上限是宽度兜底，prompt 也必须把它说出来。原来的 system 只有词数，
+  // 一句 7 词、63 码点的回答按 prompt 合规却被 60 上限拒掉——「prompt 的范围落在校验器内」当时是假的不变量。
+  // 照样从 system 里抠数字，不在测试里重述字符串：抠出的预算必须正是界线上那句（en60）的码点数。
+  const enCharBound = enSystem.match(/(\d+) characters/)
+  assert.ok(enCharBound, '英文 system 必须写出字符预算（不说出来，按 prompt 生成的长句照样被上限拒）')
+  assert.equal(Number(enCharBound[1]), [...en60].length)
+  check(true, '英文 system 也写出字符预算，且与 60 码点上限同值（界处判决见前两条）', enCharBound[0])
+
   const zhSystem = buildTipPrompt({ phase: 'short', round: 1, done: 1, now: '09:00', angle: 'water', lang: 'zh' }).system
   const zhBound = zhSystem.match(/(\d+) 到 (\d+) 个汉字/)
   assert.deepEqual([Number(zhBound[1]), Number(zhBound[2])], [12, 20])
   assert.equal(validateTip('一'.repeat(12), 'zh'), true)
   assert.equal(validateTip('一'.repeat(20), 'zh'), true)
   check(true, '中文 system 写的 12–20 个汉字落在校验器的 6–24 内（两端都过）', zhBound[0])
+}
+
+// ------------------------------------------------------------ 修复轮 3
+
+group('修复轮 3：英文断口（含制表符与 U+2028/U+2029）与换行同等补空格')
+{
+  // 上一轮的补空格常量（当时叫 TIP_ASCII_LINE_BREAK，本轮已改名 TIP_ASCII_BREAK_JOIN）只覆盖 [\r\n]，
+  // \t 与 U+2028/U+2029 仍旧走「直接删」那条路：`go grab\tsome water` 粘成 `go grabsome water`
+  // （3 个词，照样过词数校验、进气泡）——与已经修过的换行粘连是同一类损坏，只是落在修复刚碰过的那条路径上。
+
+  // 五个断口字符逐个翻一遍，两个方向都钉住：英文补空格，中文直接删
+  const breaks = [['LF', '\n'], ['CR', '\r'], ['TAB', '\t'], ['U+2028', '\u2028'], ['U+2029', '\u2029']]
+  assert.deepEqual(breaks.map(([, ch]) => sanitizeTip(`go grab${ch}some water`)), breaks.map(() => 'go grab some water'))
+  assert.deepEqual(breaks.map(([, ch]) => sanitizeTip(`水${ch}吧`)), breaks.map(() => '水吧'))
+  check(true, '五种断口字符：英文一律补空格、中文一律直接删', breaks.map(([name]) => name).join(' / '))
+
+  // 裁定点名的两条
+  assert.equal(sanitizeTip('go grab\tsome water'), 'go grab some water')
+  check(true, '制表符不再粘词：go grab\\tsome water → go grab some water', JSON.stringify(sanitizeTip('go grab\tsome water')))
+
+  assert.equal(sanitizeTip('水\t吧'), '水吧')
+  check(true, '汉字之间的制表符仍直接删掉：水\\t吧 → 水吧', JSON.stringify(sanitizeTip('水\t吧')))
+
+  // 粘连后的文本本身是 3 个词、能过校验：校验器拦不住，只能在清洗阶段修好
+  assert.equal(validateTip('go grabsome water', 'en'), true)
+  const joined = sanitizeTip('go grab\tsome water')
+  assert.equal(joined.split(/\s+/).length, 4)
+  assert.equal(validateTip(joined, 'en'), true)
+  check(true, '粘连文本「go grabsome water」是 3 词、能过校验，必须靠清洗修', 'grabsome → grab some')
+
+  // 连续与混排断口算同一个断口：只补一个空格，不多出空档
+  assert.equal(sanitizeTip('go grab\t\n\nsome water'), 'go grab some water')
+  check(true, '连续与混排断口只补一个空格', JSON.stringify(sanitizeTip('go grab\t\n\nsome water')))
 }
 
 // ---------------------------------------------------------------- 汇总
