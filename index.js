@@ -23,11 +23,13 @@ const TIP_SYSTEM_ZH = '你是休息提醒助手。'
   + '只输出一句提醒，字数严格控制在 12 到 20 个汉字之间，不加任何解释或前后缀。'
   + '不要用引号，不要用 emoji，不要说教，不要用「好的」「建议你」这类客套开头。'
 
-// 英文的长度单位必须是「词」而不是「字符」：校验器（后续任务）按 3–12 词判，
-// prompt 里若写 characters，按 prompt 生成的句子会被自己的校验器拒掉，英文路径永远回退默认句。
+// 英文的长度单位必须是「词」而不是「字符」：校验器（后续任务）按 3–8 词判，
+// prompt 里若写 characters、或上界与校验器不一致，按 prompt 生成的句子会被自己的校验器拒掉，
+// 英文路径永远回退默认句。上界 8 而不是 12：12 个词约 60+ 码点，148px 的气泡装不下，
+// 而且 prompt 说的范围必须落在校验器范围内。
 const TIP_SYSTEM_EN = 'You are a break-reminder assistant. '
   + 'At this moment, output only this one reminder sentence, with no explanation and no framing text. '
-  + 'Keep it between 3 and 12 words, use no quotation marks, no emoji, no lecturing, '
+  + 'Keep it between 3 and 8 words, use no quotation marks, no emoji, no lecturing, '
   + 'and no polite opener such as "Sure" or "I suggest".'
 
 // 角度 → 子句：中英各一张表，键必须是 TIP_ANGLES 里的 id。
@@ -122,10 +124,15 @@ const TIP_NEWLINE_OR_TAB = /[\n\r\t\u2028\u2029]/
 /** 汉字（CJK 统一表意文字）。中文字数只数它们：标点、空白、字母、数字都不计入。 */
 const TIP_HAN = /[\u4e00-\u9fff]/
 
-/** 气泡能装下的总码点上限，中英都叠这一条：只卡汉字数会漏掉「汉字 + 长英文尾巴」，
- *  实测 `站起来走两步 go walk around the block and back again` 有 46 个码点仍判 true，148px 装不下。
- *  30 让 prompt 合规的 25 码点样例照样通过，把 46 码点那种挡下。 */
-const TIP_MAX_CODE_POINTS = 30
+/** 气泡能装下的总码点上限，**按语言宽度分别定**：汉字约为拉丁字符两倍宽，同一个气泡宽度
+ *  对应 zh ≤ 30 码点 / en ≤ 60 码点。中英共用一条 30 是错的——12 个词的英文句约 60+ 码点，
+ *  会被自己的上限拒掉，英文路径永远回退默认句（与 Task 1 的长度单位栽的是同一个坑）。
+ *  中文这条堵住「汉字数合规 + 长英文尾巴」：实测 `站起来走两步 go walk around the block and back again`
+ *  有 46 个码点仍判 true，148px 装不下；30 又让 prompt 合规的 25 码点样例照样通过。 */
+const TIP_MAX_CODE_POINTS_ZH = 30
+
+/** 英文上限：8 个常见长度的词约 40–50 码点，60 留出余量，同时仍能挡下塞满长词的长句。 */
+const TIP_MAX_CODE_POINTS_EN = 60
 
 /** 脱掉最外层成对的引号，可嵌套（「"…"」）。落单的引号不猜着删。 */
 function stripWrappingQuotes(text) {
@@ -162,10 +169,12 @@ export function sanitizeTip(raw) {
 /**
  * 校验一句话能不能进 148px 的气泡。
  * 长度界与 system 的约束一致（不一致会让生成即被自己拒掉、永远回退默认句）：
- *   - zh：6–24 个汉字，**标点与空白不计入**。prompt 要求「12 到 20 个汉字」，正落在界内；
- *     若把标点也算进 6–24，一句 20 汉字 + 5 标点（25 个字符）的好回答会被自己拒掉。
- *   - en：3–12 个词，按空白分词，与英文 system 的「3 and 12 words」一致。
- *   - 两种语言再叠一条总码点上限 30：汉字数或词数合规、但后面拖一条长尾巴的输出仍然装不下。
+ *   - zh：6–24 个汉字，**标点与空白不计入**，再叠 ≤ 30 码点。prompt 要求「12 到 20 个汉字」，
+ *     正落在界内；若把标点也算进 6–24，一句 20 汉字 + 5 标点（25 个字符）的好回答会被自己拒掉。
+ *   - en：3–8 个词，按空白分词，与英文 system 的「3 and 8 words」一致，再叠 ≤ 60 码点。
+ *   - 码点上限按语言宽度分别定：汉字约为拉丁字符两倍宽，同一个气泡宽度对应 zh 30 / en 60。
+ *     中英共用一条 30 会把 7–8 词的合规英文句拒掉（12 个 'walk' 就是 59 码点），
+ *     英文路径因此永远回退默认句——正是本文件开头警告的那类故障。
  * lang 只认 'en'，其余取值（含缺陷值）一律按中文校验，与 buildTipPrompt 的取值约定相同。
  * @param {string} text 待校验文本（通常是 sanitizeTip 的结果）
  * @param {'zh'|'en'} lang 界面语言
@@ -180,12 +189,13 @@ export function validateTip(text, lang) {
   if (TIP_EMOJI.test(trimmed)) return false
   if (TIP_NEWLINE_OR_TAB.test(trimmed)) return false
   // 码点数（不是 UTF-16 长度）：代理对只算一个，emoji 那种字符不会把上限翻倍。
-  if ([...trimmed].length > TIP_MAX_CODE_POINTS) return false
-
+  // 上限按语言宽度分，所以放在语言分支里判。
   if (lang === 'en') {
+    if ([...trimmed].length > TIP_MAX_CODE_POINTS_EN) return false
     const words = trimmed.split(/\s+/).length
-    return words >= 3 && words <= 12
+    return words >= 3 && words <= 8
   }
+  if ([...trimmed].length > TIP_MAX_CODE_POINTS_ZH) return false
   const han = countHan(trimmed)
   return han >= 6 && han <= 24
 }

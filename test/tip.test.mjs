@@ -43,7 +43,7 @@ group('角度表与 prompt 构造')
   const en = buildTipPrompt({ phase: 'long', round: 4, done: 7, now: '15:20', angle: 'distance', lang: 'en' })
   assert.ok(!/[\u4e00-\u9fff]/.test(en.user))
   assert.ok(en.user.toLowerCase().includes('distance'))
-  // 英文用词数：必须与 Task 2 校验器的 3–12 词一致，否则生成的句子会被自己的校验器拒掉
+  // 英文用词数：必须与 Task 2 校验器的 3–8 词一致，否则生成的句子会被自己的校验器拒掉
   assert.ok(/words/i.test(en.system) && !/characters/i.test(en.system))
   check(true, '英文 user 全英文且含 distance 子句，system 用"词"约束长度', en.user)
 
@@ -115,7 +115,7 @@ group('输出校验 validateTip')
   assert.equal(validateTip('去接\n杯水吧', 'zh'), false)      // 换行
   check(true, '中文：6 字过；太短 / 太长 / 纯空白 / emoji / 换行都拒', '6 → true，其余 → false')
 
-  // 英文按词数：3–12 词
+  // 英文按词数：3–8 词
   assert.equal(validateTip('go grab some water', 'en'), true)
   assert.equal(validateTip('go', 'en'), false)
   assert.equal(validateTip(Array.from({ length: 13 }, () => 'walk').join(' '), 'en'), false)
@@ -167,16 +167,15 @@ group('中文长度只数汉字，标点不计入（本任务的边界裁定）'
   check(true, '下界处的真实答案：6 个汉字带句号通过', '站起来走两步。')
 }
 
-group('英文按词数 3–12')
+group('英文按词数 3–8')
 {
-  // 边界两侧各钉一个：3 词与 12 词通过，2 词与 13 词拒绝。
-  // 12 词那条只能用单字母词：12 个 'walk' 是 59 码点，已被叠加的总码点上限 30 挡下（见修复组），
-  // 词数界本身仍要独立钉住，所以把词长压进上限之内。
+  // 边界两侧各钉一个：3 词与 8 词通过，2 词与 9 词拒绝。
+  // 词长都压在上限之内，这样钉住的确实是词数界本身，而不是码点上限。
   assert.equal(validateTip('go drink water', 'en'), true)
-  assert.equal(validateTip(Array.from({ length: 12 }, () => 'a').join(' '), 'en'), true)
+  assert.equal(validateTip(Array.from({ length: 8 }, () => 'a').join(' '), 'en'), true)
   assert.equal(validateTip('go walk', 'en'), false)
-  assert.equal(validateTip(Array.from({ length: 13 }, () => 'a').join(' '), 'en'), false)
-  check(true, '英文边界：3 词与 12 词过，2 词与 13 词拒（词长在上限内）', '3 / 12 → true，2 / 13 → false')
+  assert.equal(validateTip(Array.from({ length: 9 }, () => 'a').join(' '), 'en'), false)
+  check(true, '英文边界：3 词与 8 词过，2 词与 9 词拒（词长在上限内）', '3 / 8 → true，2 / 9 → false')
 
   // 形状检查在长度之前，且不分语言
   assert.equal(validateTip('go grab some water 🙂', 'en'), false)
@@ -194,28 +193,29 @@ group('英文按词数 3–12')
 
 group('修复轮：总码点上限、英文换行补空格、客套必须跟标点、校验器挡制表符')
 {
-  // 总码点上限 30（叠在汉字数界之上）：6 个汉字 + 40 个 ASCII = 46 码点，148px 的气泡装不下
+  // 中文码点上限 30（叠在汉字数界之上）：6 个汉字 + 40 个 ASCII = 46 码点，148px 的气泡装不下
   const longTail = '站起来走两步 go walk around the block and back again'
   assert.equal([...longTail].length, 46)
   assert.equal(validateTip(longTail, 'zh'), false)
-  check(true, '汉字数合规但 46 码点的长尾巴被总上限 30 挡下', `${[...longTail].length} 码点 → false`)
+  check(true, '汉字数合规但 46 码点的长尾巴被中文上限 30 挡下', `${[...longTail].length} 码点 → false`)
 
   // 上限不能把 prompt 合规的好答案一起拒掉：25 码点的样例仍在界内
   const ok25 = '站起来走两步，去接水，抬头看远处，深呼吸，伸懒腰。'
   assert.equal([...ok25].length, 25)
   assert.equal(validateTip(ok25, 'zh'), true)
-  check(true, '总上限 30 不误杀 25 码点的合规样例', `${[...ok25].length} 码点 → true`)
+  check(true, '中文上限 30 不误杀 25 码点的合规样例', `${[...ok25].length} 码点 → true`)
 
   // 上限的边界两侧：24 个汉字（汉字上界）恰好只留 6 个 ASCII 位
   assert.equal(validateTip('一'.repeat(24) + 'x'.repeat(6), 'zh'), true)
   assert.equal(validateTip('一'.repeat(24) + 'x'.repeat(7), 'zh'), false)
-  check(true, '总码点边界：30 过、31 拒（汉字数同为 24）', '30 → true，31 → false')
+  check(true, '中文码点边界：30 过、31 拒（汉字数同为 24）', '30 → true，31 → false')
 
-  // 英文同样叠这条上限：12 个 'walk' 词数合规（12 ≤ 12），但 59 码点超上限
+  // 上一轮英文词数界还是 3–12，12 个 'walk'（59 码点）词数合规、由 30 码点上限挡下。
+  // 本轮词数上界收到 8、英文上限放宽到 60，这条改由词数界拒 —— 判决不变，理由变了。
   const twelveWalk = Array.from({ length: 12 }, () => 'walk').join(' ')
   assert.equal([...twelveWalk].length, 59)
   assert.equal(validateTip(twelveWalk, 'en'), false)
-  check(true, '英文词数合规但 59 码点，同样被总上限拒', `${[...twelveWalk].length} 码点 → false`)
+  check(true, '12 个 walk（59 码点）仍拒：本轮由英文词数上界 8 挡下', `${[...twelveWalk].length} 码点 / 12 词 → false`)
 
   // 英文换行必须先补一个空格再删，否则粘成一个词「grabsome」，还能通过词数校验进气泡
   assert.equal(sanitizeTip('go grab\nsome water'), 'go grab some water')
@@ -232,6 +232,69 @@ group('修复轮：总码点上限、英文换行补空格、客套必须跟标�
   // 调用方跳过 sanitizeTip 时，校验器自己也要挡下制表符（站/起/来/走/两/步 = 6 个汉字，本来会过）
   assert.equal(validateTip('站\t起来走两步', 'zh'), false)
   check(true, '校验器直接挡下制表符（6 个汉字也不放行）', JSON.stringify('站\t起来走两步'))
+}
+
+// ------------------------------------------------------------ 修复轮 2
+
+group('修复轮 2：码点上限按语言宽度分（zh 30 / en 60），英文词数上界收到 8')
+{
+  // 上一轮把 30 码点总上限中英共用，压住了英文的词数界：12 个 'walk' 是 59 码点，
+  // 一句 7–12 词的合规英文回答会被自己的上限拒掉 —— 又一次「按 prompt 生成却被自己拒」。
+  // 汉字约拉丁字符两倍宽，所以同一个气泡宽度对应 zh ≤ 30 码点 / en ≤ 60 码点。
+
+  // 合规的英文回答必须过：8 个 'walk' 是 8 词、39 码点，旧的中英共用 30 上限会误杀
+  const enOk = Array.from({ length: 8 }, () => 'walk').join(' ')
+  assert.equal(enOk.split(/\s+/).length, 8)
+  assert.equal([...enOk].length, 39)
+  assert.equal(validateTip(enOk, 'en'), true)
+  check(true, '英文：8 词、39 码点的合规句通过（旧的共用 30 上限会拒）', `${[...enOk].length} 码点 → true`)
+
+  // 英文上限的边界两侧：60 过、61 拒，词数同为 8（钉住的确实是英文那条上限）
+  const en60 = ['aaaaaaa', 'bbbbbbb', 'ccccccc', 'ddddddd', 'eeeeeee', 'fffffff', 'ggggggg', 'hhhh'].join(' ')
+  const en61 = ['aaaaaaa', 'bbbbbbb', 'ccccccc', 'ddddddd', 'eeeeeee', 'fffffff', 'ggggggg', 'hhhhh'].join(' ')
+  assert.equal(en60.split(/\s+/).length, 8)
+  assert.equal(en61.split(/\s+/).length, 8)
+  assert.equal([...en60].length, 60)
+  assert.equal([...en61].length, 61)
+  assert.equal(validateTip(en60, 'en'), true)
+  assert.equal(validateTip(en61, 'en'), false)
+  check(true, '英文码点边界：60 过、61 拒（词数同为 8）', '60 → true，61 → false')
+
+  // 词数合规但尾巴过长，仍由英文上限挡下
+  const enLong = Array.from({ length: 8 }, (_, i) => String.fromCharCode(97 + i).repeat(9)).join(' ')
+  assert.equal(enLong.split(/\s+/).length, 8)
+  assert.equal([...enLong].length, 79)
+  assert.equal(validateTip(enLong, 'en'), false)
+  check(true, '英文：词数合规（8 词）但 79 码点，被 60 上限挡下', `${[...enLong].length} 码点 → false`)
+
+  // 中文上限仍是 30：合规句过，超宽句拒
+  const zhOk = '站起来走两步，去接水，抬头看远处，深呼吸，伸懒腰。'
+  assert.equal([...zhOk].length, 25)
+  assert.equal(validateTip(zhOk, 'zh'), true)
+  assert.equal(validateTip('一'.repeat(24) + 'x'.repeat(7), 'zh'), false)
+  check(true, '中文上限仍是 30：25 码点合规句过、31 码点拒', '25 → true，31 → false')
+
+  // 钉住「上一轮定下的判决不变」：25 码点的中文合规样例过，46 码点的中英混排拒
+  const longTail = '站起来走两步 go walk around the block and back again'
+  assert.equal([...longTail].length, 46)
+  assert.equal(validateTip(longTail, 'zh'), false)
+  check(true, '上轮两条钉样判决不变：25 码点 → true，46 码点 → false', '回归钉')
+
+  // prompt 说的范围必须落在校验器范围内：直接拿 system 里写的数字去翻边界
+  const enSystem = buildTipPrompt({ phase: 'short', round: 1, done: 1, now: '09:00', angle: 'water', lang: 'en' }).system
+  const enBound = enSystem.match(/(\d+) and (\d+) words/)
+  assert.deepEqual([Number(enBound[1]), Number(enBound[2])], [3, 8])
+  assert.equal(validateTip(Array.from({ length: 3 }, () => 'a').join(' '), 'en'), true)
+  assert.equal(validateTip(Array.from({ length: 8 }, () => 'a').join(' '), 'en'), true)
+  assert.equal(validateTip(Array.from({ length: 9 }, () => 'a').join(' '), 'en'), false)
+  check(true, '英文 system 写的 3–8 词 = 校验器的 3–8 词（词数界处判决一致）', enBound[0])
+
+  const zhSystem = buildTipPrompt({ phase: 'short', round: 1, done: 1, now: '09:00', angle: 'water', lang: 'zh' }).system
+  const zhBound = zhSystem.match(/(\d+) 到 (\d+) 个汉字/)
+  assert.deepEqual([Number(zhBound[1]), Number(zhBound[2])], [12, 20])
+  assert.equal(validateTip('一'.repeat(12), 'zh'), true)
+  assert.equal(validateTip('一'.repeat(20), 'zh'), true)
+  check(true, '中文 system 写的 12–20 个汉字落在校验器的 6–24 内（两端都过）', zhBound[0])
 }
 
 // ---------------------------------------------------------------- 汇总
