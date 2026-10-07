@@ -1,13 +1,16 @@
 /**
  * 番茄时钟 —— 浏览器半边。
  *
- * 挂载在全窗口浮层 `shell.overlay` 里，有两种形态：
+ * 挂载在全窗口浮层 `shell.overlay` 里，有三种形态：
  *   · 面板态：番茄图标 + 标题 + 收起按钮 / 阶段胶囊标签 / 超大倒计时 / 反色主按钮；
- *   · 圆盘态：62px 圆盘，外环是本阶段进度，中心是倒计时。
+ *   · 圆盘态：62px 圆盘，外环是本阶段进度，中心是倒计时；
+ *   · 休息气泡：短休/长休期间在中上方浮出 148px 圆形气泡（阶段名 / 剩余时间 / 提醒句），
+ *     点 ✕ 缩成挨着圆盘的 30px 小圆点，休息一结束就散掉。
  *
  * 计时模型在 `apply` 里只创建一次，所以收起、切会话、刷新页面都不会打断倒计时。
  * 浮层本身是点击穿透的、只给直接子元素放行事件，因此这个部件的根节点必须
- * 始终只有自身大小，绝不能做成铺满屏幕的容器。
+ * 始终只有自身大小，绝不能做成铺满屏幕的容器 —— 气泡是另一个同层节点，
+ * 同样只有自身大小（见 BreakTip 上方的说明）。
  */
 window.__ModuleLoader__.load({
   id: '@local/pomodoro-clock',
@@ -19,6 +22,10 @@ window.__ModuleLoader__.load({
     const PLUGIN_ID = '@local/pomodoro-clock'
     const STORAGE_KEY = 'dsh.pomodoro-clock.v1'
     const UI_KEY = 'dsh.pomodoro-clock.ui.v1'
+    /** 提醒角度的落盘键。与 UI 键分开：拖动位置和角度轮换互不相干，不该互相覆盖。 */
+    const TIP_KEY = 'dsh.pomodoro-clock.tip.v1'
+    /** 提醒请求在客户端侧的上限（毫秒）。宿主自己也有超时，这里只保证请求不无限挂着。 */
+    const TIP_TIMEOUT_MS = 3500
     /** 计时器轮询间隔：只用来刷新显示，真实时间以 endsAt 为准。 */
     const TICK_MS = 250
     /** 页面重开后最多补算多少个已结束的阶段，超过就当作过期运行重置。 */
@@ -37,7 +44,7 @@ window.__ModuleLoader__.load({
       longEvery: [1, 12],
     }
     /** 开关型设置。 */
-    const FLAG_SETTINGS = ['autoStartBreak', 'autoStartFocus', 'sound']
+    const FLAG_SETTINGS = ['autoStartBreak', 'autoStartFocus', 'sound', 'aiTip']
 
     const DEFAULT_SETTINGS = {
       focusMinutes: 25,
@@ -47,6 +54,7 @@ window.__ModuleLoader__.load({
       autoStartBreak: true,
       autoStartFocus: false,
       sound: true,
+      aiTip: true,
     }
 
     const EN = {
@@ -63,10 +71,14 @@ window.__ModuleLoader__.load({
       'action.collapse': 'Collapse to a floating dial',
       'action.expand': 'Open the Pomodoro clock',
       'action.move': 'Drag to move',
+      'action.dismissTip': 'Collapse the break reminder',
+      'action.expandTip': 'Show the break reminder',
       'label.progress': 'Progress',
       'label.phase': 'Choose a phase',
       'stats.completed': 'Completed',
       'stats.cycle': 'Cycle',
+      'tip.title': 'Break reminder',
+      'tip.fallback': 'Stand up and walk a few steps',
       'settings.title': 'Settings',
       'settings.focus': 'Focus',
       'settings.short': 'Short break',
@@ -77,6 +89,7 @@ window.__ModuleLoader__.load({
       'settings.autoStartBreak': 'Start breaks automatically',
       'settings.autoStartFocus': 'Start focus automatically',
       'settings.sound': 'Chime when a phase ends',
+      'settings.aiTip': 'AI-written break reminders',
       'settings.resetStats': 'Clear statistics',
     }
 
@@ -94,10 +107,14 @@ window.__ModuleLoader__.load({
       'action.collapse': '收起为悬浮圆盘',
       'action.expand': '打开番茄时钟',
       'action.move': '拖动可移动',
+      'action.dismissTip': '收起休息提醒',
+      'action.expandTip': '展开休息提醒',
       'label.progress': '进度',
       'label.phase': '选择阶段',
       'stats.completed': '已完成',
       'stats.cycle': '本轮',
+      'tip.title': '休息提醒',
+      'tip.fallback': '站起来走两步',
       'settings.title': '设置',
       'settings.focus': '专注',
       'settings.short': '短休息',
@@ -108,6 +125,7 @@ window.__ModuleLoader__.load({
       'settings.autoStartBreak': '自动开始休息',
       'settings.autoStartFocus': '自动开始专注',
       'settings.sound': '阶段结束提示音',
+      'settings.aiTip': 'AI 生成提醒语',
       'settings.resetStats': '清除统计',
     }
 
@@ -136,6 +154,12 @@ window.__ModuleLoader__.load({
       check: 'dsp-pc-check',
       actions: 'dsp-pc-actions',
       btn: 'dsp-pc-btn',
+      tip: 'dsp-pc-tip',
+      tipClose: 'dsp-pc-tip-close',
+      tipPhase: 'dsp-pc-tip-phase',
+      tipTime: 'dsp-pc-tip-time',
+      tipText: 'dsp-pc-tip-text',
+      tipDot: 'dsp-pc-tip-dot',
     }
 
     /**
@@ -296,6 +320,48 @@ window.__ModuleLoader__.load({
       `background:conic-gradient(var(--dsp-pc-dial,var(--dsw-alias-bg-overlay)) var(--dsp-pc-progress,0%),var(--dsp-pc-dial-rest,var(--dsw-alias-bg-overlay)) 0);`,
       `color:var(--dsw-alias-label-primary);`,
       `font-size:12px;font-weight:600;line-height:1;font-variant-numeric:tabular-nums}`,
+      // ---- 休息气泡 ----
+      // 148px 圆形气泡，中上方。定位交给整帧浮层（`shell.overlay` 是 inset:0 的层），
+      // 不用 `position:fixed`：固定定位在带 transform 的祖先下会改参考系，而浮层这一层
+      // 就是现成的坐标系 —— 圆盘的默认位置用的也是它。
+      // `--dsh-frame-overlay-top` 是宿主给浮层元素算好的「窗口顶栏之下 20px」（macOS 与
+      // Windows 各自把标题栏高度算进去了），普通网页里没有这个变量，用 32px 兜底。
+      // 水平居中走 `translate` 而不是 `transform`：`transform` 要留给进出场动画的缩放，
+      // 两者写在一起会互相覆盖（动画一跑，居中就没了）。
+      `.${CLASS.tip}{position:absolute;left:50%;top:var(--dsh-frame-overlay-top,32px);translate:-50% 0;`,
+      `box-sizing:border-box;width:148px;height:148px;padding:22px 18px;border-radius:50%;`,
+      `display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;text-align:center;`,
+      `border:1px solid var(--dsw-alias-border-l1);`,
+      `background:var(--dsw-specific-menu,var(--dsw-alias-bg-overlay));`,
+      `-webkit-backdrop-filter:blur(14px) saturate(1.3);backdrop-filter:blur(14px) saturate(1.3);`,
+      `box-shadow:var(--dsw-elevation-soft,0 8px 28px rgb(0 0 0 / 16%));`,
+      `animation:dsp-pc-tip-in 240ms ease-out}`,
+      `.${CLASS.tipPhase}{font-size:11px;line-height:14px;font-weight:600;color:var(--dsw-alias-label-primary)}`,
+      `.${CLASS.tipTime}{font-size:22px;line-height:26px;color:var(--dsw-alias-label-primary);font-variant-numeric:tabular-nums}`,
+      // 提醒句：换句时靠 React 的 key 换掉这个节点，这条动画随之重放（见 BreakTip）。
+      `.${CLASS.tipText}{font-size:11px;line-height:15px;color:var(--dsw-alias-label-secondary);`,
+      `overflow-wrap:anywhere;animation:dsp-pc-tip-text 260ms ease-out}`,
+      // ✕：留在圆内（顶到圆外会露在圆形背景之外），按下不抢焦点。
+      `.${CLASS.tipClose}{position:absolute;top:22px;right:26px;box-sizing:border-box;display:inline-flex;`,
+      `align-items:center;justify-content:center;width:20px;height:20px;padding:0;border:none;border-radius:999px;`,
+      `background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;line-height:1;cursor:pointer}`,
+      `.${CLASS.tipClose}:hover{background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary)}`,
+      `.${CLASS.tipClose}:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}`,
+      `.${CLASS.tipClose} svg{display:block}`,
+      // 小圆点：挂在部件根节点**内部**（`right:100%`），所以拖动圆盘/卡片时它跟着走，
+      // 不需要任何测量代码。只有 30px，数字读的是同一个 snapshot，秒级 tick 照常刷新。
+      `.${CLASS.tipDot}{position:absolute;right:100%;top:50%;translate:0 -50%;margin-right:6px;`,
+      `box-sizing:border-box;width:30px;height:30px;padding:0;border-radius:50%;display:grid;place-items:center;`,
+      `border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-specific-menu,var(--dsw-alias-bg-overlay));`,
+      `box-shadow:var(--dsw-elevation-soft,0 8px 28px rgb(0 0 0 / 16%));color:var(--dsw-alias-label-primary);`,
+      `font:inherit;font-size:9px;line-height:1;font-variant-numeric:tabular-nums;cursor:pointer;`,
+      `animation:dsp-pc-tip-in 200ms ease-out}`,
+      `.${CLASS.tipDot}:hover{background:var(--dsw-alias-bg-layer-2)}`,
+      `.${CLASS.tipDot}:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}`,
+      `@keyframes dsp-pc-tip-in{from{opacity:0;transform:scale(.94)}to{opacity:1;transform:none}}`,
+      `@keyframes dsp-pc-tip-text{from{opacity:0}to{opacity:1}}`,
+      // 减少动态效果：淡入与缩放**整个关掉**（不是缩短）。气泡照常出现、照常更新。
+      `@media (prefers-reduced-motion:reduce){.${CLASS.tip},.${CLASS.tipDot},.${CLASS.tipText}{animation:none}}`,
     ].join('')
 
     // ---- 纯函数工具 ------------------------------------------------------
@@ -371,6 +437,96 @@ window.__ModuleLoader__.load({
         ? { x: stored.pos.x, y: stored.pos.y }
         : null
       return { pos: position, collapsed: stored !== null && stored.collapsed === true }
+    }
+
+    // ---- 休息提醒：角度轮换、语言与请求 ----------------------------------
+
+    // 角度 id 列表在客户端**必须自带一份**：client.js 是浏览器包（`window.__ModuleLoader__`
+    // 的工厂），宿主半 index.js 是 ESM 模块，两者不共享模块系统，拿不到宿主那份 TIP_ANGLES。
+    // 顺序即轮换顺序，两边必须逐项一致；宿主对不认识的取值一律回退到第一个，所以最坏情况
+    // 只是这个新角度暂时用不上，不会报错。test/tip.test.mjs 按下面的标记切出来钉这两件事。
+    // --- tip-angle:start ---
+    /** 提醒角度的轮换顺序（宿主 TIP_ANGLES 的副本，见上）。 */
+    const TIP_ANGLES = ['water', 'distance', 'walk', 'stretch', 'breathe']
+
+    /**
+     * 下一个角度。未知取值（宿主将来加了新角度、本地存了坏数据）不抛，从第一个角度起轮 ——
+     * 与宿主的兜底同一套语义，最坏只是轮换少一档，不会让提醒句消失。
+     * @param {string | null | undefined} prev 上一次用过的角度；没存过时为 null
+     * @returns {string} 本次要用的角度 id
+     */
+    function nextAngle(prev) {
+      return TIP_ANGLES[(TIP_ANGLES.indexOf(prev) + 1) % TIP_ANGLES.length]
+    }
+    // --- tip-angle:end ---
+
+    /** 上一次用过的角度；没存过、或存了不认识的值时返回 null（首次即从第一个角度起轮）。 */
+    function readAngle() {
+      const stored = readJson(TIP_KEY)
+      const angle = stored === null ? null : stored.angle
+      return typeof angle === 'string' && TIP_ANGLES.includes(angle) ? angle : null
+    }
+
+    /** 落盘本次角度。**发请求之前就写**：失败也要轮换，否则一直 204 就永远停在同一个角度。 */
+    function writeAngle(angle) {
+      writeJson(TIP_KEY, { angle })
+    }
+
+    /**
+     * 界面语言的短码（'zh' | 'en'），作为 query 参数发给宿主。
+     *
+     * 读 locale 服务的快照，而不是自己记一份：语言随时可切，快照才是当下值（语言切换会经
+     * `subscribeLocale` 触发重渲染，所以这个值跟着更新，请求也随之重发）。
+     * 只有 zh 发 'zh'，其余一律 'en'：宿主只认 'en' 走英文模板，其它取值会被它按中文处理
+     * （prompt 要求写中文、长度按汉字数校验）—— 发给非中文界面等于拿中文的界去卡别的语言。
+     * 读不到快照时也不抛，按 'en'。
+     */
+    function readLang(ctx) {
+      try {
+        const active = ctx.locale.getLocale().active
+        return typeof active === 'string' && active.toLowerCase().startsWith('zh') ? 'zh' : 'en'
+      } catch (error) {
+        return 'en'
+      }
+    }
+
+    /**
+     * 拉一次提醒句。**永不抛**：204（宿主的每一条失败路径）/ 超时 / 断网 / 响应体不合形
+     * 一律返回 null，调用方保持默认句 —— 气泡不会因为这句话变空或报错。
+     * @param {string} url 请求地址（五个 query 参数都已带齐）
+     * @param {AbortSignal} signal 同时承担 3.5 秒超时与"休息结束就取消"两种取消
+     * @returns {Promise<string | null>} 可用的一句话，或 null
+     */
+    async function requestTip(url, signal) {
+      try {
+        const response = await fetch(url, { signal })
+        // 204 是宿主的失败出口：它不是错误，但也没有正文可读。
+        if (response.status !== 200) return null
+        const body = await response.json()
+        const text = body !== null && typeof body === 'object' ? body.text : null
+        if (typeof text !== 'string') return null
+        const trimmed = text.trim()
+        return trimmed === '' ? null : trimmed
+      } catch (error) {
+        return null
+      }
+    }
+
+    /**
+     * 本次请求的取消信号：3.5 秒超时 + 休息结束时的主动取消，合成一个。
+     *
+     * `AbortSignal.any` 是 2024 年才齐的 API。万一环境里没有，宁可退化成"只带主动取消"
+     * （超时还有宿主自己那道 3 秒），也绝不让构造信号这件事抛出去：这个 effect 抛错会被
+     * 浮层的错误边界连整个时钟一起撤掉 —— 一个可选的提醒句不值得拿时钟来换。
+     * @param {AbortController} controller 休息结束时由 effect 清理调用的那个
+     * @returns {AbortSignal} fetch 用的信号
+     */
+    function tipSignal(controller) {
+      try {
+        return AbortSignal.any([controller.signal, AbortSignal.timeout(TIP_TIMEOUT_MS)])
+      } catch (error) {
+        return controller.signal
+      }
     }
 
     // ---- 阶段结束提示音 --------------------------------------------------
@@ -771,6 +927,12 @@ window.__ModuleLoader__.load({
     const collapseIcon = () => icon(
       h('path', { d: 'M3.5 8h9', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round' }))
 
+    /** 气泡右上角的 ✕：收起成小圆点。 */
+    const closeIcon = () => icon([
+      h('path', { key: 'a', d: 'M4.3 4.3l7.4 7.4', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round' }),
+      h('path', { key: 'b', d: 'M11.7 4.3l-7.4 7.4', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round' }),
+    ])
+
     /**
      * 左上角的番茄钟图标：立体番茄 + 暖白表盘 + 时针分针。
      *
@@ -992,6 +1154,12 @@ window.__ModuleLoader__.load({
           checked: settings.sound,
           onChange: (value) => pomodoro.updateSettings({ sound: value }),
         }),
+        // 关掉就连请求都不发：气泡照样出、照样显示默认句（见 PomodoroClock 的 effect 守卫）。
+        h(CheckField, {
+          label: t('settings.aiTip'),
+          checked: settings.aiTip,
+          onChange: (value) => pomodoro.updateSettings({ aiTip: value }),
+        }),
         h('div', { className: CLASS.actions },
           h('button', {
             type: 'button',
@@ -1015,13 +1183,127 @@ window.__ModuleLoader__.load({
       event.stopPropagation()
     }
 
-    function PomodoroClock({ pomodoro, t, subscribeLocale }) {
+    /**
+     * 中上方的 148px 圆形气泡：三行 = 阶段名 / 剩余时间 / 提醒句。
+     *
+     * 它和时钟根节点是**兄弟**（都直接挂在整帧浮层里）：气泡的参考系是整帧（中上方），
+     * 时钟是被拖动或贴着右下角的另一个盒子，两者不能共用一个容器。各是各的尺寸，
+     * 浮层其余部分照旧点击穿透。
+     * 不抢输入焦点：挂载时不调用 focus()，✕ 的 mousedown 也 preventDefault ——
+     * 点它不会把光标从正在编辑的地方带走。
+     */
+    function BreakTip({ snap, t, sentence, onDismiss }) {
+      return h('div', {
+        className: CLASS.tip,
+        'data-pomodoro-tip': 'bubble',
+        role: 'group',
+        'aria-label': t('tip.title'),
+      },
+      h('button', {
+        type: 'button',
+        className: CLASS.tipClose,
+        onMouseDown: (event) => event.preventDefault(),
+        onClick: onDismiss,
+        'aria-label': t('action.dismissTip'),
+        title: t('action.dismissTip'),
+      }, closeIcon()),
+      h('span', { className: CLASS.tipPhase }, phaseLabelOf(t, snap.phase)),
+      // 剩余时间与卡片/圆盘读同一个 snapshot，所以秒级 tick 照常刷新它。
+      h('div', { className: CLASS.tipTime, role: 'timer', 'aria-live': 'off' }, snap.text),
+      // key 换成句子就重挂这一行，CSS 的淡入随之重放：默认句 → AI 句是"换"而不是"跳"。
+      // sentence 为 null 时显示 i18n 的默认句 —— 中文不写死在逻辑里。
+      h('span', {
+        key: sentence ?? 'tip-fallback',
+        className: CLASS.tipText,
+      }, sentence ?? t('tip.fallback')))
+    }
+
+    /**
+     * 收起后的小圆点：挨着圆盘/卡片，只显示剩余时间。
+     *
+     * 挂在时钟根节点**内部**（CSS 用 `right:100%` 贴到它左边），所以拖动圆盘、在圆盘与
+     * 面板之间切换，它都跟着走，不需要任何测量。
+     * `onPointerDown` 必须截住：圆盘态的父节点在 pointerdown 上起拖动、按位移判点击，
+     * 不截住的话点这个小圆点会顺带把部件展开成面板。
+     */
+    function TipDot({ snap, t, onExpand }) {
+      const label = `${t('action.expandTip')} · ${snap.text}`
+      return h('button', {
+        type: 'button',
+        className: CLASS.tipDot,
+        'data-pomodoro-tip': 'dot',
+        onPointerDown: stopPointer,
+        onMouseDown: (event) => event.preventDefault(),
+        onClick: onExpand,
+        'aria-label': label,
+        title: label,
+      }, snap.text)
+    }
+
+    function PomodoroClock({ pomodoro, t, subscribeLocale, getLang }) {
       const snap = usePomodoro(pomodoro)
       const [ui, setUi] = React.useState(readUi)
       const [open, setOpen] = React.useState(false)
       const [dragging, setDragging] = React.useState(false)
+      // 气泡自己的两件状态：是否被 ✕ 收成了小圆点、以及拿回来的那句提醒。
+      // 两者都不落盘 —— 它们只属于"当前这一轮休息"，刷新页面后重新来一次是正确的。
+      const [tipDismissed, setTipDismissed] = React.useState(false)
+      const [tipSentence, setTipSentence] = React.useState(null)
       const rootRef = React.useRef(null)
       useLocaleRefresh(subscribeLocale)
+
+      // 休息阶段的判断只在这里做一次：三个阶段里只有 short / long 出气泡，
+      // 切到专注就是"散掉"（return null 的渲染分支 + effect 清理里的 abort）。
+      const breakPhase = snap.phase === 'focus' ? null : snap.phase
+      const lang = getLang()
+      const aiTip = snap.settings.aiTip === true
+
+      // 折叠态不跨轮次：休息结束、或从一种休息切到另一种，下一个休息重新给大气泡。
+      React.useEffect(() => {
+        setTipDismissed(false)
+      }, [breakPhase])
+
+      /**
+       * 休息开始时拉一次提醒句；任何失败都保持默认句、不做任何提示（失败矩阵见设计文档）。
+       * 依赖只有三个原始值（阶段 / 语言 / AI 开关），所以秒级 tick 不会重发请求；
+       * 反过来，语言或开关中途变了会重新发一次，气泡里的句子跟着换成对应语言的。
+       */
+      React.useEffect(() => {
+        // 换阶段或换语言后先回到默认句：上一轮/上一语言的句子立刻作废，不留过期文案。
+        setTipSentence(null)
+        if (breakPhase === null || !aiTip) return undefined
+        // 角度先落盘再发请求：这次失败也要轮换，否则一直 204 就永远停在同一个角度。
+        const angle = nextAngle(readAngle())
+        writeAngle(angle)
+        const controller = new AbortController()
+        let live = true
+        // 五个参数一个都不能少：宿主对缺席或非数字的 round / done 一律 204
+        // （它有意不做 Number(null) === 0 那种静默兜底，见 index.js 的 parseCount）。
+        const query = new URLSearchParams({
+          phase: breakPhase,
+          // 休息期间 cycleFocus 就是「本轮第几个番茄」（专注结束时先加一、再判长休息）。
+          round: String(snap.cycleFocus),
+          // 模型没有"今天"这个维度，completedFocus 就是设置面板里那个「已完成」总数。
+          done: String(snap.completedFocus),
+          angle,
+          lang,
+        })
+        void requestTip(
+          `/pomodoro/tip?${query.toString()}`,
+          // 两种取消合成一个 signal：3.5 秒超时，以及休息一结束就 abort（见返回值）。
+          tipSignal(controller),
+        ).then((text) => {
+          // Review Focus 4：响应可能晚于这次休息到达（用户切到专注、或休息走完）。
+          // 那两种情况下这个 effect 已经被清理：live 为 false、请求已 abort，
+          // 所以迟到的响应绝不替换默认句，也不会让已经消失的气泡复活。
+          if (!live || text === null) return
+          setTipSentence(text)
+        })
+        return () => {
+          live = false
+          controller.abort()
+        }
+      }, [breakPhase, lang, aiTip])
 
       const updateUi = (patch) => {
         const next = { ...ui, ...patch }
@@ -1119,8 +1401,19 @@ window.__ModuleLoader__.load({
         ? t('action.pause')
         : snap.phase === 'focus' ? t('action.start') : t('action.startBreak')
 
+      // 休息期间的两个形态，二选一：大气泡（默认）或小圆点（点了 ✕ 之后）。
+      // 小圆点是部件根节点的子节点（CSS 的 right:100% 让它挨着圆盘/卡片），
+      // 大气泡则是它的**兄弟**节点（位置参考系是整帧浮层，与可拖动的时钟不同）。
+      // 两者都是自身大小，浮层其余部分照旧点击穿透。
+      const tipDot = breakPhase !== null && tipDismissed
+        ? h(TipDot, { snap, t, onExpand: () => setTipDismissed(false) })
+        : null
+      const tipBubble = breakPhase !== null && !tipDismissed
+        ? h(BreakTip, { snap, t, sentence: tipSentence, onDismiss: () => setTipDismissed(true) })
+        : null
+
       if (ui.collapsed) {
-        return h('div', {
+        return h(React.Fragment, null, h('div', {
           ref: rootRef,
           className: `${CLASS.root} ${CLASS.mini}`,
           'data-phase': snap.phase,
@@ -1142,10 +1435,12 @@ window.__ModuleLoader__.load({
         h('span', {
           className: CLASS.ring,
           style: { '--dsp-pc-progress': `${percent}%` },
-        }, h('span', { className: CLASS.ringInner }, snap.text)))
+        }, h('span', { className: CLASS.ringInner }, snap.text)),
+        tipDot),
+        tipBubble)
       }
 
-      return h('div', {
+      return h(React.Fragment, null, h('div', {
         ref: rootRef,
         className: `${CLASS.root} ${CLASS.card}`,
         'data-phase': snap.phase,
@@ -1216,7 +1511,9 @@ window.__ModuleLoader__.load({
         'aria-label': toggleLabel,
         title: toggleLabel,
       }, snap.running ? pauseIcon() : playIcon(), h('span', null, toggleLabel)),
-      open ? h(SettingsPanel, { snap, pomodoro, t }) : null)
+      open ? h(SettingsPanel, { snap, pomodoro, t }) : null,
+      tipDot),
+      tipBubble)
     }
 
     // ---- 插件主体 --------------------------------------------------------
@@ -1269,11 +1566,12 @@ window.__ModuleLoader__.load({
       }, 'pomodoro tick')
 
       // 注册在 root 作用域的浮层上：整个窗口只有一个时钟，且不随会话切换重建。
+      // `getLang` 传函数而不是传值：注册时 inject 只求值一次，而语言随时可切。
       ctx.effect(() => ctx.slots.inject('shell.overlay', () => ctx.slots.register({
         name: 'shell.overlay',
         id: 'pomodoro-clock',
         order: 5,
-        inject: () => ({ pomodoro: model, t, subscribeLocale }),
+        inject: () => ({ pomodoro: model, t, subscribeLocale, getLang: () => readLang(ctx) }),
       }, PomodoroClock)), 'pomodoro overlay')
     }
 

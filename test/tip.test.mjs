@@ -8,8 +8,15 @@
 // 「未预料异常也必须有痕」这一条不变量。
 // 做法与 test/model.test.mjs 一致：一个 check() 帮手 + 末尾按失败数决定退出码，方便后续任务顺序追加。
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import { apply, buildTipPrompt, isSameOrigin, resolveTip, sanitizeTip, TIP_ANGLES, validateTip } from '../index.js'
+// 宿主那份角度表的显式别名。下面「客户端角度轮换」一组里的 TIP_ANGLES 是**从 client.js
+// 按标记切片求值出来的那一份**（浏览器包 import 不了宿主半，两份是各自独立的副本），
+// 漂移检查必须把两边分开命名，否则比的就是同一份。
+import { TIP_ANGLES as HOST_ANGLES } from '../index.js'
 
 let checks = 0
 let failures = 0
@@ -710,6 +717,48 @@ group('handler 未预料异常的留痕')
   } finally {
     console.warn = realWarn
   }
+}
+
+// ------------------------------------------------------------ 客户端角度轮换（Task 5）
+
+// client.js 是浏览器 bundle（`window.__ModuleLoader__.load(...)`）、不能 import，
+// 所以沿用 test/model.test.mjs 的**标记切片法**：把 `// --- tip-angle:start ---` 与
+// `// --- tip-angle:end ---` 之间的源码切出来求值。切片里必须同时含**客户端自己的角度列表**
+// 与 nextAngle —— 少了列表，nextAngle 跑起来会抛 ReferenceError。宿主那份拿不到，也不该拿。
+const clientSource = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'client.js'), 'utf8')
+
+function loadClientTipAngle() {
+  const start = clientSource.indexOf('// --- tip-angle:start ---')
+  const end = clientSource.indexOf('// --- tip-angle:end ---', start)
+  if (start < 0 || end < 0) throw new Error('切片失败: // --- tip-angle:start --- .. // --- tip-angle:end ---')
+  const slice = clientSource.slice(start, end)
+  return new Function(`${slice}\nreturn { TIP_ANGLES, nextAngle }`)()
+}
+
+group('客户端角度轮换 nextAngle（标记切片，与宿主那份互不依赖）')
+{
+  // 这里的 TIP_ANGLES 是 client.js 里那一份；HOST_ANGLES 才是从 index.js 导入的宿主副本。
+  const { TIP_ANGLES, nextAngle } = loadClientTipAngle()
+
+  // 轮换一圈回到起点，且每次都变
+  let a = TIP_ANGLES[0]
+  const seen = [a]
+  for (let i = 0; i < TIP_ANGLES.length - 1; i += 1) { a = nextAngle(a); seen.push(a) }
+  assert.equal(new Set(seen).size, TIP_ANGLES.length)
+  assert.equal(nextAngle(TIP_ANGLES[TIP_ANGLES.length - 1]), TIP_ANGLES[0])
+  check(true, '轮换一圈恰好走遍每个角度并回到起点', `${seen.join(' → ')} → ${TIP_ANGLES[0]}`)
+
+  // 未知值不抛，退到第一个。null 是「本地还没存过角度」的取值（readAngle 的返回值），
+  // 所以首次休息也从 TIP_ANGLES[0] 起轮。
+  assert.equal(nextAngle('nope'), TIP_ANGLES[0])
+  assert.equal(nextAngle(null), TIP_ANGLES[0])
+  check(true, '未知值与空值都不抛，退到第一个角度（首次休息即从它起轮）',
+    `'nope' / null → ${TIP_ANGLES[0]}`)
+
+  // 客户端副本必须与宿主半那份一致（漂移会让新角度永远不被使用）
+  assert.deepEqual(TIP_ANGLES, HOST_ANGLES)
+  check(true, '客户端副本与宿主 TIP_ANGLES 逐项一致（漂移会让新角度永远不被使用）',
+    TIP_ANGLES.join(' / '))
 }
 
 // ---------------------------------------------------------------- 汇总
