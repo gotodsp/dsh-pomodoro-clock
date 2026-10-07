@@ -44,7 +44,9 @@
 - Consumes: 无
 - Produces:
   - `export const TIP_ANGLES` — `['water','distance','walk','stretch','breathe']`，顺序固定，客户端按同一顺序轮换
-  - `export function buildTipPrompt(input: { phase: 'short'|'long', round: number, done: number, angle: string, lang: 'zh'|'en' }): { system: string, user: string }`
+  - `export function buildTipPrompt(input: { phase: 'short'|'long', round: number, done: number, now: string, angle: string, lang: 'zh'|'en' }): { system: string, user: string }`
+
+`now` 是调用方算好的本地时间短串（`'15:20'`）。**宿主半不自己取时间**，这样函数保持纯、可测。
 
 - [ ] **Step 1: 写失败测试**
 
@@ -56,23 +58,29 @@ import { buildTipPrompt, TIP_ANGLES } from '../index.js'
 // 断言 1：角度表是固定的五个，顺序即轮换顺序
 assert.deepEqual(TIP_ANGLES, ['water', 'distance', 'walk', 'stretch', 'breathe'])
 
-// 断言 2：中文请求的 system 里必须含"只输出"和字数约束，user 里必须含状态数字
-const zh = buildTipPrompt({ phase: 'short', round: 3, done: 7, angle: 'water', lang: 'zh' })
+// 断言 2：中文请求的 system 里必须含"只输出"和字数约束，user 里必须含状态数字与时间
+const zh = buildTipPrompt({ phase: 'short', round: 3, done: 7, now: '15:20', angle: 'water', lang: 'zh' })
 assert.ok(zh.system.includes('只输出'))
+assert.ok(zh.system.includes('12') && zh.system.includes('20'))   // 字数约束的上下界都在
 assert.ok(zh.user.includes('3') && zh.user.includes('7'))
+assert.ok(zh.user.includes('15:20'))                              // spec 要求把当前时间喂给模型
 assert.ok(zh.user.includes('水'))          // water 角度映射到"喝水"
 
-// 断言 3：英文请求的 user 不含中文字符
-const en = buildTipPrompt({ phase: 'long', round: 4, done: 7, angle: 'distance', lang: 'en' })
+// 断言 3：英文请求的 user 不含中文字符，且英文的长度约束用"词"而非"字符"
+const en = buildTipPrompt({ phase: 'long', round: 4, done: 7, now: '15:20', angle: 'distance', lang: 'en' })
 assert.ok(!/[\u4e00-\u9fff]/.test(en.user))
 assert.ok(en.user.toLowerCase().includes('distance'))
+// 英文用词数：必须与 Task 2 校验器的 3–12 词一致，否则生成的句子会被自己的校验器拒掉
+assert.ok(/words/i.test(en.system) && !/characters/i.test(en.system))
 
 // 断言 4：五个角度都能映射出非空子句，且互不相同
-const clauses = TIP_ANGLES.map((a) => buildTipPrompt({ phase: 'short', round: 1, done: 1, angle: a, lang: 'zh' }).user)
+const clauses = TIP_ANGLES.map((a) => buildTipPrompt({ phase: 'short', round: 1, done: 1, now: '09:00', angle: a, lang: 'zh' }).user)
 assert.equal(new Set(clauses).size, TIP_ANGLES.length)
 
-// 断言 5：未知角度不抛异常，退到第一个角度
-assert.doesNotThrow(() => buildTipPrompt({ phase: 'short', round: 1, done: 1, angle: 'nope', lang: 'zh' }))
+// 断言 5：未知角度不抛异常，且**确实**退到第一个角度（不只是"没抛"）
+const fallbackUser = buildTipPrompt({ phase: 'short', round: 1, done: 1, now: '09:00', angle: 'nope', lang: 'zh' }).user
+const firstUser = buildTipPrompt({ phase: 'short', round: 1, done: 1, now: '09:00', angle: TIP_ANGLES[0], lang: 'zh' }).user
+assert.equal(fallbackUser, firstUser)
 ```
 
 - [ ] **Step 2: 运行测试确认失败**
@@ -172,7 +180,7 @@ git commit -m "休息提醒：输出清洗与长度校验"
 **Interfaces:**
 - Consumes: Task 1 的 `buildTipPrompt`、`TIP_ANGLES`；Task 2 的 `sanitizeTip`、`validateTip`
 - Produces:
-  - `export async function resolveTip(deps: { llm: { stream(o: object): AsyncIterable<object> } | undefined, provider: string, model: string, signal?: AbortSignal }, input: { phase, round, done, angle, lang }): Promise<string | null>`
+  - `export async function resolveTip(deps: { llm: { stream(o: object): AsyncIterable<object> } | undefined, provider: string, model: string, signal?: AbortSignal }, input: { phase, round, done, now, angle, lang }): Promise<string | null>`
   - 返回值：可用的句子，或 `null`（调用方把 `null` 映射成 204）
 
 `deps.llm` 为 `undefined` 时立即返回 `null`（第一道降级，早于任何 I/O）。
@@ -182,7 +190,7 @@ git commit -m "休息提醒：输出清洗与长度校验"
 - [ ] **Step 1: 写失败测试（用假 llm，覆盖失败矩阵）**
 
 ```js
-const input = { phase: 'short', round: 1, done: 1, angle: 'water', lang: 'zh' }
+const input = { phase: 'short', round: 1, done: 1, now: '15:20', angle: 'water', lang: 'zh' }
 const okLlm = (chunks) => ({ stream: async function* () { for (const c of chunks) yield c } })
 const textChunks = (s) => [{ type: 'text-delta', text: s }, { type: 'finish', reason: { kind: 'stop' } }]
 
@@ -272,7 +280,11 @@ Expected: FAIL —— `isSameOrigin` 未定义
 
 `apply(ctx)` 里：`const llm = ctx.get('llm')`；`const server = ctx.get('webServer')`；`server` 缺席则整体不注册。注册 `{ kind: 'exact', path: '/pomodoro/tip', handler }`，`handler` 用 `ctx.effect` 挂载以便随插件卸载。
 
-handler 顺序：同源检查不过 → 204 → 解析 query → `resolveTip` → `null` 则 204，否则 `200 {"text": ...}`。**响应头带 `cache-control: no-store`。** 客户端断开时 abort 进行中的生成。
+handler 顺序：同源检查不过 → 204 → 解析 query → `resolveTip` → `null` 则 204，否则 `200 {"text": ...}`。**响应头带 `cache-control: no-store`。** 客户端断开时 abort 进行中的生成（`req.on('close')` → `controller.abort()`，signal 传进 `deps.signal`）。
+
+**query 的值全部是字符串，必须在调用 `resolveTip` 前转成数字**：`round` 与 `done` 用 `Number(...)` 转换并检查 `Number.isFinite`，转换失败就当作 204。**不转的话 `buildTipPrompt` 的防御性兜底会把它们静默变成 `1` 和 `0`**——模型会对一个配置完全正确的用户说"本轮第 1 个番茄，今天已完成 0 个"，而没有任何地方看得出错了。
+
+`now` 由 handler 自己算：取本地时间的 `HH:MM`（`new Date()` → 补零），**不要交给 `buildTipPrompt` 去取**，那会破坏它的纯函数性质。
 
 provider/model 取 `ctx.get('agentDefaultModel').currentSelection()`；取不到则当作 `llm` 缺席处理（204）。
 
