@@ -206,3 +206,91 @@ export function validateTip(text, lang) {
   const han = countHan(trimmed)
   return han >= 6 && han <= 24
 }
+
+// ------------------------------------------------------------ 生成编排
+//
+// resolveTip 是纯逻辑与真实模型调用之间唯一的接缝：llm 服务从参数注入，所以这一层能在
+// 不碰网络的前提下把失败矩阵全部走一遍（见 test/tip.test.mjs 的「生成编排」一组）。
+// 它的契约只有一条：**要么返回一句能进气泡的话，要么返回 null**——绝不抛，绝不返回半句话。
+// 调用方把 null 映射成 204，气泡保留默认句。
+
+/** 单次生成的内部超时（毫秒）。慢响应宁可回退默认句，也不让 HTTP 请求挂着。 */
+const TIP_TIMEOUT_MS = 3000
+
+/** 单次生成的输出预算（token）。正文就一句话，60 足够，同时封住最坏成本。 */
+const TIP_MAX_TOKENS = 60
+
+/**
+ * 生成一句休息提醒。
+ *
+ * 失败矩阵（七条路径全部返回 null，任何一条都不抛）：服务缺席、模型抛错、空响应、
+ * 校验不过（太短/太长/客套长句）、终止原因非 stop、外部取消、内部超时。
+ * @param {{ llm?: { stream(o: object): AsyncIterable<object> }, provider: string, model: string, signal?: AbortSignal }} deps
+ *   llm 是宿主上下文里的 llm 服务（`ctx.get('llm')`），缺席即第一道降级；
+ *   provider / model 由调用方按用户当前选择传入，本函数不硬编码；
+ *   signal 是外部取消（路由在客户端断开时 abort 它）。
+ * @param {{ phase: 'short'|'long', round: number, done: number, now: string, angle: string, lang: 'zh'|'en' }} input
+ *   与 buildTipPrompt 同形的状态输入，lang 同时决定校验用哪套长度界。
+ * @returns {Promise<string | null>} 清洗 + 校验通过的一句话，或 null。
+ */
+export async function resolveTip(deps, input) {
+  const llm = deps?.llm
+  // 第一道降级：服务缺席时连超时都不建，直接回退（早于任何 I/O）。
+  if (llm === undefined || llm === null) return null
+
+  try {
+    // 外部 signal 与内部超时必须**合并**：只取外部会让慢响应挂住请求；只取内部会让用户
+    // 切走后模型调用继续跑并计费。deps.signal 缺席时退化为只用自己的超时。
+    // （放进 try 里：传进来的 signal 若不是真的 AbortSignal，AbortSignal.any 会抛错，
+    //   这里同样按「回退默认句」处理，不外泄。）
+    const signal = deps.signal
+      ? AbortSignal.any([deps.signal, AbortSignal.timeout(TIP_TIMEOUT_MS)])
+      : AbortSignal.timeout(TIP_TIMEOUT_MS)
+    if (signal.aborted) return null
+
+    const { system, user } = buildTipPrompt(input)
+    let text = ''
+    let finished = false
+
+    // 不传 reasoningEffort（让适配器用自己的默认，本机默认档很高，写一句话不该抬推理），
+    // 不传 purpose（该字段只接受 compaction / session-title，没有给插件留位置）。
+    const stream = llm.stream({
+      provider: deps.provider,
+      model: deps.model,
+      system,
+      messages: [{ role: 'user', content: [{ type: 'text', text: user }] }],
+      maxTokens: TIP_MAX_TOKENS,
+      signal,
+    })
+
+    for await (const chunk of stream) {
+      // 用户切走 / 超时：已攒的内容一律丢弃，这句话已经没人要了。
+      if (signal.aborted) return null
+      // 只认 text-delta：reasoning-delta 是模型的思考过程，绝不能进气泡。
+      if (chunk?.type === 'text-delta') {
+        // text 不是字符串说明流本身坏了，攒出来的句子不可信 —— 宁可回退（sanitizeTip 对
+        // 非字符串会显式抛错，不能让它把异常泄到调用方）。
+        if (typeof chunk.text !== 'string') return null
+        text += chunk.text
+        continue
+      }
+      // 终止块：只有干净收尾（stop）才采纳已攒正文。error / aborted / max-tokens /
+      // tool-calls 都意味着内容失败或被截断，正文必须整个丢掉。
+      if (chunk?.type === 'finish') {
+        if (chunk.reason?.kind !== 'stop') return null
+        finished = true
+      }
+    }
+
+    // 一次调用没有终止块 = 流被截断（适配器约定每次调用都以 finish 收尾），不采纳。
+    if (!finished) return null
+
+    // 清洗负责救回引号/换行/客套，校验只回答「能不能进气泡」。清得干净不等于可用。
+    const clean = sanitizeTip(text)
+    return validateTip(clean, input.lang) ? clean : null
+  } catch {
+    // 任何异常（含 sanitizeTip 对非字符串的显式抛错、buildTipPrompt 收到坏 input）
+    // 都不外泄：调用方只认 null。
+    return null
+  }
+}

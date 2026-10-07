@@ -2,13 +2,13 @@
 //
 //   node test/tip.test.mjs
 //
-// 这里只测这类无副作用的纯函数：prompt 构造、输出清洗与长度校验。
-// HTTP 路由与模型调用是薄适配层，不进这里。
+// 这里测纯函数（prompt 构造、输出清洗与长度校验），以及注入了假 llm 的生成编排：
+// 两者都无网络、无副作用。HTTP 路由是薄适配层，不进这里（它靠 Task 4 的实机验证）。
 // 做法与 test/model.test.mjs 一致：一个 check() 帮手 + 末尾按失败数决定退出码，
 // 方便后续任务顺序追加。
 import assert from 'node:assert/strict'
 
-import { buildTipPrompt, sanitizeTip, TIP_ANGLES, validateTip } from '../index.js'
+import { buildTipPrompt, resolveTip, sanitizeTip, TIP_ANGLES, validateTip } from '../index.js'
 
 let checks = 0
 let failures = 0
@@ -337,6 +337,175 @@ group('修复轮 3：英文断口（含制表符与 U+2028/U+2029）与换行同
   // 连续与混排断口算同一个断口：只补一个空格，不多出空档
   assert.equal(sanitizeTip('go grab\t\n\nsome water'), 'go grab some water')
   check(true, '连续与混排断口只补一个空格', JSON.stringify(sanitizeTip('go grab\t\n\nsome water')))
+}
+
+// ------------------------------------------------------------ 生成编排（依赖注入）
+
+group('生成编排 resolveTip：注入假 llm，覆盖全部失败路径')
+{
+  // 假 llm 让「模型调用」这一层完全不碰网络：只要求 stream() 返回 AsyncIterable。
+  // 正文样例用「去接一杯水吧」（6 个汉字）而不是计划里的「去接杯水吧」：后者只有 5 个汉字，
+  // 过不了 validateTip 的 6–24 下界（该下界已由本文件前面的断言钉住），拿它当「正常路径」
+  // 的样例等于让样例自己违约 —— 正常路径的样例必须是 prompt 合规、校验也能过的句子。
+  const input = { phase: 'short', round: 1, done: 1, now: '15:20', angle: 'water', lang: 'zh' }
+  const okLlm = (chunks) => ({ stream: async function* () { for (const c of chunks) yield c } })
+  const textChunks = (s) => [{ type: 'text-delta', text: s }, { type: 'finish', reason: { kind: 'stop' } }]
+  const deps = (llm, extra = {}) => ({ llm, provider: 'p', model: 'm', ...extra })
+
+  // 正常路径：攒 text-delta，清洗 + 校验后返回
+  assert.equal(await resolveTip(deps(okLlm(textChunks('去接一杯水吧'))), input), '去接一杯水吧')
+  check(true, '正常：攒 text-delta，返回校验通过的句子', '去接一杯水吧')
+
+  // 返回的是清洗后的句子：客套前缀与包裹引号不该出现在气泡里
+  assert.equal(await resolveTip(deps(okLlm(textChunks('好的，「站起来走两步」'))), input), '站起来走两步')
+  check(true, '返回值确实经过 sanitizeTip（客套前缀 + 包裹引号都清掉）', '站起来走两步')
+
+  // 英文走同一条链路，按 en 的长度界校验
+  assert.equal(await resolveTip(deps(okLlm(textChunks('go grab some water'))), { ...input, lang: 'en' }), 'go grab some water')
+  check(true, '英文路径：按 en 规则校验并返回', 'go grab some water')
+
+  // 只认 text-delta：reasoning-delta 是模型的思考过程（本机默认推理档很高，它一定会来），
+  // 一旦被并进正文，气泡里就会出现「让我想想去接一杯水吧」这种话。
+  const withReasoning = [
+    { type: 'reasoning-delta', text: '让我想想' },
+    { type: 'text-delta', text: '去接一杯水吧' },
+    { type: 'finish', reason: { kind: 'stop' } },
+  ]
+  assert.equal(await resolveTip(deps(okLlm(withReasoning)), input), '去接一杯水吧')
+  check(true, 'reasoning-delta 不进正文，只有 text-delta 参与构句', '让我想想 + 去接一杯水吧 → 去接一杯水吧')
+
+  // 第一道降级：服务缺席 → 立即 null，不建超时、不碰模型、不抛
+  assert.equal(await resolveTip({ llm: undefined, provider: 'p', model: 'm' }, input), null)
+  check(true, 'llm 服务缺席 → null（第一道降级，早于任何 I/O）', 'llm: undefined')
+
+  // 调用方把参数传坏（deps 整个缺席 / input 缺席 / signal 不是真的 AbortSignal）也不许抛：
+  // 契约只有「返回 null」一种出口
+  assert.equal(await resolveTip(undefined, input), null)
+  assert.equal(await resolveTip(deps(okLlm(textChunks('去接一杯水吧'))), undefined), null)
+  assert.equal(await resolveTip({ ...deps(okLlm(textChunks('去接一杯水吧'))), signal: {} }, input), null)
+  check(true, '坏参数（deps 缺席 / input 缺席 / signal 不是 AbortSignal）→ null，不抛', '坏参数走同一条出口')
+
+  // 迭代中抛错（网络断）：异常不外泄
+  const boom = { stream: async function* () { throw new Error('network') } }
+  assert.equal(await resolveTip(deps(boom), input), null)
+  check(true, '模型抛错 → null，异常不外泄', 'throw new Error("network")')
+
+  // 先吐正文再抛错：已攒内容必须丢弃，不能把半句话送进气泡
+  const half = { stream: async function* () { yield { type: 'text-delta', text: '去接一杯水吧' }; throw new Error('network') } }
+  assert.equal(await resolveTip(deps(half), input), null)
+  check(true, '先吐正文再抛错 → 半句话也丢弃，返回 null', 'text-delta 之后 throw')
+
+  // stream() 本身同步抛错（适配器坏掉）：同样只返回 null
+  const syncBoom = { stream: () => { throw new Error('bad adapter') } }
+  assert.equal(await resolveTip(deps(syncBoom), input), null)
+  check(true, 'stream() 同步抛错 → null', 'sync throw')
+
+  // 流不守约：text 不是字符串（这里是数组）时不能靠字符串拼接「碰巧」拼出一句合规的话，
+  // 也不能让 sanitizeTip 对非字符串的显式抛错泄出去；stream() 返回的不是 AsyncIterable
+  // 同样只走 null 出口。
+  const badText = { stream: async function* () { yield { type: 'text-delta', text: ['去接一杯水吧'] }; yield { type: 'finish', reason: { kind: 'stop' } } } }
+  assert.equal(await resolveTip(deps(badText), input), null)
+  const notIterable = { stream: () => undefined }
+  assert.equal(await resolveTip(deps(notIterable), input), null)
+  check(true, '流不守约（text 非字符串 / stream 返回非可迭代）→ null，异常不外泄', '协议坏掉就回退')
+
+  // 校验不过 → null（空响应）
+  assert.equal(await resolveTip(deps(okLlm(textChunks(''))), input), null)
+  check(true, '空响应 → 校验不过 → null', 'text-delta ""')
+
+  // 校验不过 → null（客套长句）
+  const long = '好的，我建议你站起来走动一下，顺便去接一杯水，然后看看远处的风景，让眼睛休息一下'
+  assert.equal(await resolveTip(deps(okLlm(textChunks(long))), input), null)
+  check(true, '客套长句 → 校验不过 → null', `清洗后仍 ${sanitizeTip(long).length} 字符`)
+
+  // 一个 chunk 都没有的空流 → null（不是异常，是「什么都没生成」）
+  assert.equal(await resolveTip(deps(okLlm([])), input), null)
+  check(true, '空流（一个 chunk 都没有）→ null', 'chunks: []')
+
+  // 只有正文、没有终止块：流被截断，不能当成生成成功
+  assert.equal(await resolveTip(deps(okLlm([{ type: 'text-delta', text: '去接一杯水吧' }])), input), null)
+  check(true, '没有 finish 终止块（流被截断）→ null', '只有 text-delta')
+
+  // finish 非 stop：已攒正文全部丢弃。error / aborted 是模型失败与取消，max-tokens 是
+  // 60 token 上限处被截断，tool-calls 是模型跑偏去调工具 —— 四种都不能当作完整句子。
+  const badKinds = ['error', 'aborted', 'max-tokens', 'tool-calls']
+  const badVerdicts = []
+  for (const kind of badKinds) {
+    const chunks = [{ type: 'text-delta', text: '去接一杯水吧' }, { type: 'finish', reason: { kind } }]
+    badVerdicts.push(await resolveTip(deps(okLlm(chunks)), input))
+  }
+  assert.deepEqual(badVerdicts, badKinds.map(() => null))
+  check(true, 'finish 非 stop（error / aborted / max-tokens / tool-calls）→ 已攒内容全部丢弃', badKinds.join(' / '))
+
+  // 外部 signal 已 abort（路由在客户端断开时会这样调）→ null，且不该再发起模型调用
+  const ac = new AbortController()
+  ac.abort()
+  let called = false
+  const spyCalled = { stream: async function* () { called = true; for (const c of textChunks('去接一杯水吧')) yield c } }
+  assert.equal(await resolveTip(deps(spyCalled, { signal: ac.signal }), input), null)
+  assert.equal(called, false)
+  check(true, '外部 signal 已 abort → null，且一次模型调用都不发起', `stream 被调用：${called}`)
+
+  // 生成中途用户切走：正文已攒全、finish 也是 stop，但 signal 已 abort → 仍然丢弃
+  const acMid = new AbortController()
+  const midway = {
+    stream: async function* () {
+      yield { type: 'text-delta', text: '去接一杯水吧' }
+      acMid.abort()
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    },
+  }
+  assert.equal(await resolveTip(deps(midway, { signal: acMid.signal }), input), null)
+  check(true, '生成中途 abort → 正文再合规也不采纳（用户切走后不再替换气泡）', 'chunk 之间 abort')
+
+  // 不真等 3 秒测内部超时（那会让整个用例慢 3 秒，真实超时由 Task 4 实机验证覆盖）。
+  // 这里能观测的是两件事，合起来足以排除两种单取一边的实现：
+  //   (a) 传进模型的 signal 不是外部那个对象本身 —— 「只用外部 signal」的实现会把 deps.signal
+  //       原样传下去，过不了；
+  //   (b) 外部 abort 后它立刻跟着 abort —— 「只用内部超时」的实现过不了。
+  // 剩下「内部 3 秒超时确实也在合并里」这一半无法在单测里便宜地观测（要真等 3 秒），
+  // 由 Task 4 的实机验证覆盖。
+  const acAny = new AbortController()
+  let seen = null
+  const captor = {
+    stream: (o) => {
+      seen = o
+      return (async function* () { for (const c of textChunks('去接一杯水吧')) yield c })()
+    },
+  }
+  assert.equal(await resolveTip(deps(captor, { signal: acAny.signal }), input), '去接一杯水吧')
+  assert.ok(seen.signal instanceof AbortSignal)
+  assert.notEqual(seen.signal, acAny.signal)
+  const abortedBefore = seen.signal.aborted
+  acAny.abort()
+  assert.equal(abortedBefore, false)
+  assert.equal(seen.signal.aborted, true)
+  check(true, 'deps.signal 与内部超时合并（AbortSignal.any）：传给模型的不是外部 signal 本身，且随外部 abort',
+    `同一对象 ${seen.signal === acAny.signal}，abort 前 ${abortedBefore} → abort 后 ${seen.signal.aborted}`)
+
+  // 请求体的形状：provider / model / system / messages / maxTokens=60 / signal 齐全，
+  // 且**不得**出现 reasoningEffort 与 purpose（后者只接受 compaction / session-title）。
+  // messages 里的 content 是 ContentBlock[]（真实 llm 服务的请求消息按块数组解析），
+  // 只带一个 text 块，内容正是 buildTipPrompt 的 user 串（发给模型的只有状态数字与角度）。
+  const prompt = buildTipPrompt(input)
+  let opts = null
+  const spyOpts = {
+    stream: (o) => {
+      opts = o
+      return (async function* () { for (const c of textChunks('去接一杯水吧')) yield c })()
+    },
+  }
+  assert.equal(await resolveTip(deps(spyOpts), input), '去接一杯水吧')
+  assert.equal(opts.provider, 'p')
+  assert.equal(opts.model, 'm')
+  assert.equal(opts.system, prompt.system)
+  assert.deepEqual(opts.messages, [{ role: 'user', content: [{ type: 'text', text: prompt.user }] }])
+  assert.equal(opts.maxTokens, 60)
+  assert.ok(opts.signal instanceof AbortSignal)
+  assert.equal('reasoningEffort' in opts, false)
+  assert.equal('purpose' in opts, false)
+  check(true, '请求体：provider/model/system/messages/maxTokens=60/signal 齐全，无 reasoningEffort、无 purpose',
+    'maxTokens 60，content 为 ContentBlock[]')
 }
 
 // ---------------------------------------------------------------- 汇总
