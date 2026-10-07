@@ -63,10 +63,10 @@ Harness Web UI 的**悬浮**专注计时器。挂载在全窗口浮层 `shell.ov
 - **形态**：148px 正圆、磨砂半透明（`backdrop-filter: blur(14px) saturate(1.3)`，底色沿用宿主自己的 `--dsw-specific-menu`），停在窗口中上方。竖坐标取宿主给浮层算好的 `--dsh-frame-overlay-top`（macOS 与 Windows 的标题栏高度都已算进去；普通网页里没有这个变量，退到 32px），水平靠 `translate:-50% 0` 居中——`transform` 要留给进出场动画的缩放，两者写在一起会互相覆盖。
 - **三行**：阶段名 / 剩余时间 / 一句提醒。剩余时间与卡片、圆盘读的是**同一个 snapshot**，所以秒级 tick 照常刷新它。
 - **进出场**：休息开始时 240ms 淡入 + 轻微缩放；提醒句被替换时那一行单独淡入一次（React 的 `key` 换掉节点）。`prefers-reduced-motion: reduce` 时把动画**整个关掉**（不是缩短）。
-- **点 ✕**：气泡收成一个 **30px 小圆点**，挨着圆盘 / 卡片，只显示剩余时间；圆点读同一个 snapshot，数字照常每秒走。
+- **点 ✕**：气泡收成一个 **30px 小圆点**，挨着圆盘 / 卡片，只显示剩余时间；圆点读同一个 snapshot，数字照常每秒走。**如果这次 ✕ 是键盘（Enter / 空格）按下的**，焦点会跟着落到小圆点上——否则被激活的按钮随气泡一起卸载，焦点掉回 `document.body`，键盘用户得从文档开头重新 Tab 一整圈才碰到唯一的控件（`MouseEvent.detail === 0` 即键盘/辅助技术激活；鼠标点击不动焦点）。
 - **点小圆点**：大气泡回来。AI 句已经到了的话，第三行还是那一句（不会被打回默认句）；还没到就继续显示默认句，到了再换。
 - **休息期间它不会真正消失**：✕ 只是收起。休息结束、或用户切到专注，气泡与小圆点一起消失，进行中的请求同时 abort。
-- **不抢输入焦点**：挂载时不 `focus()`，✕ 与小圆点的 `mousedown` 都 `preventDefault`——点它们不会把光标从正在编辑的地方带走。
+- **不抢输入焦点**：挂载时不 `focus()`，✕ 与小圆点的 `mousedown` 都 `preventDefault`——点它们不会把光标从正在编辑的地方带走。（上面那条键盘路径是**收尾**不是抢：被按的按钮马上要卸载，焦点无主。）
 - **点击穿透**：两个节点各是自身尺寸（148×148 / 30×30），浮层其余部分照旧穿透（圆角之外、方块之内的四个角仍会吃掉点击——"只在自己矩形内"的允许范围）。小圆点挂在时钟根节点**内部**（CSS `right:100%`），所以拖动圆盘、在圆盘与卡片之间切换，它都跟着走，不需要任何测量代码。
 - **可以不生成**：设置面板里的「AI 生成提醒语」（`aiTip`，默认开）。关掉就完全不发请求，气泡只显示默认句。
 - **已知重叠**：气泡固定在中上方，卡片被拖到那里时会被压在下面，没有做避让。
@@ -81,7 +81,7 @@ GET /pomodoro/tip?phase=short&round=3&done=7&angle=water&lang=zh
   → 204 空体                                        其余一切情况
 ```
 
-**五个参数客户端都会带上，宿主只对 `round` / `done` 硬性要求。** 这两个缺席、空串或非数字一律 204，这条是刻意的：`Number(null)` 是 `0`，静默放过去会让模型对一个配置完全正确的用户说「本轮第 0 个番茄」，而且从外面完全看不出错。（`phase` / `angle` / `lang` 有兜底：不认识的角度回退到第一个，非 `en` 的语言按中文处理。）
+**五个参数客户端都会带上，宿主只对 `round` / `done` 硬性要求。** 这两个缺席、空串、非数字，**以及小数或负数**（`round=1.5`、`done=-3`）一律 204，这条是刻意的：`Number(null)` 是 `0`，静默放过去会让模型对一个配置完全正确的用户说「本轮第 0 个番茄」，而 `1.5` / `-3` 这种前提同样是递给模型的假话；三种情况从外面都看不出错。客户端的 `cycleFocus` 起步是 `0`（开机、长休息结束回到专注、长休息中途切到专注、清除统计之后），宿主**接受** `0`（它是合法整数），所以「本轮第 1 个番茄」这个钳制由客户端做（`tipRoundParam`），宿主不替调用方圆场。（`phase` / `angle` / `lang` 有兜底：不认识的角度回退到第一个，非 `en` 的语言按中文处理。）
 
 **`done` 是累计数，不是「今天」。** 客户端发的是 `completedFocus`（设置面板里那个「已完成」，只有「清除统计」才归零），插件里没有按天的维度，所以 prompt 写的是「已完成 N 个（累计）」。跨天不清零时说「今天已完成 12 个」是递给模型的**假前提**，它会顺着这个前提编。
 
@@ -97,14 +97,14 @@ GET /pomodoro/tip?phase=short&round=3&done=7&angle=water&lang=zh
 |---|---|---|
 | `ctx.get('llm')` 拿不到 | 204 + 日志 `no-service:llm` | 默认句 |
 | 没配默认模型（`agentDefaultModel.currentSelection()` 缺席） | 204 + 日志 `no-service:agentDefaultModel` | 默认句 |
-| 模型抛错 / `stream()` 同步抛错 / 流迭代中抛错 / `text` 不是字符串 | 204 + 对应短码 | 默认句 |
+| 模型抛错 / `stream()` 同步抛错 / 流迭代中抛错 / `text` 不是字符串 | 204 + 对应短码（`stream-threw` / `iteration-threw` / `bad-delta`）；**signal 已 abort 时归到下面那两行**（`timeout` / `client-abort`），因为真实原因是取消，不是网络故障 | 默认句 |
 | 清洗后仍不合长度界（空响应、太短、太长、emoji、断口、客套长句） | 204 + 日志 `rejected:<码点>cp/<汉字>han` | 默认句 |
 | 终止原因不是 `stop`（`error` / `aborted` / `max-tokens` / `tool-calls`） | 204，已攒的正文**整个丢弃** | 默认句 |
-| 流没有终止块（被截断） | 204 + `no-finish` | 默认句 |
-| 3 秒没生成完 | 204 + `timeout`（实测 3042ms / 3032ms 砍掉真实的慢调用） | 默认句 |
-| 用户在生成期间切走 / 关页面 | 请求 abort + 日志 `client-abort` | 请求已取消；迟到的响应被 `live` 守卫丢掉，气泡不复活 |
+| 流没有终止块（被截断） | 204 + `no-finish`；**abort 导致流提前干净结束时记 `timeout` / `client-abort`**，不是「被截断」 | 默认句 |
+| 3 秒没生成完（含适配器用 reject 兑现 `signal` 的情况） | 204 + `timeout`（实测 3042ms / 3032ms 砍掉真实的慢调用） | 默认句 |
+| 用户在生成期间切走 / 关页面 | 请求 abort + 日志 `client-abort`（同上：适配器 reject 也算） | 请求已取消；迟到的响应被 `live` 守卫丢掉，气泡不复活 |
 | handler 在 `resolveTip` 之外抛出未预料的异常（`ctx.get` 或 `currentSelection()` 抛错、将来在 `writeHead` 之前引入的回归） | 204 + 日志 `handler-threw`（**先留痕再回**；响应已经发出的话不再改状态） | 默认句 |
-| 跨站 `Origin`、非法 query（`round=abc`、缺 `done`…） | 204，**不写日志**（这是调用方自己的问题） | ——（客户端只发同源请求） |
+| 跨站 `Origin`、非法 query（`round=abc`、`round=1.5`、`done=-3`、缺 `done`…） | 204，**不写日志**（这是调用方自己的问题） | ——（客户端只发同源请求） |
 | 客户端侧：非 200（含宿主还没加载路由时的 404）、3.5 秒超时、断网、响应体不合形 | —— | 默认句 |
 
 **「回退到默认句」不等于「什么都看不出来」**：宿主每次**生成失败**都会写一行日志（见下节）。而 404（路由没注册）恰恰是**没有日志**的那一种，症状与「生成一直失败」完全一样，排查顺序见「改完之后怎么生效」。
@@ -136,7 +136,7 @@ pomodoro: 休息提醒生成失败，本次回退默认句（timeout）
 
 计划原本写的是「不传 `reasoningEffort`，让适配器用它自己的默认」——**这是反的**。适配层的默认档是 `high`，而思考型模型会先吐满整整 60 个 token 的 `reasoning-delta`（把 `maxTokens` 全吃光），随后以 `finish{kind:'max-tokens'}` 收尾，**一个 `text-delta` 都没有**；fail-closed 的闸门于是正确地返回 `null` → **永远 204**，从外面看与「插件坏了」完全同形。这是本功能最贵的一个 bug。
 
-现在请求里显式带 `reasoningEffort: 'off'`（DSH 自己的 `session-title` 单行生成用的也是它）。万一当前默认模型不认这个档（llm 的能力校验跑在**派发之前**，会以终止性 `finish{kind:'error'}` + `UNSUPPORTED_REASONING_EFFORT` 结束、不发真实请求），`resolveTip` 会**去掉这个字段重试一次**：采纳标准一点没松（第二次同样必须拿到 `finish{kind:'stop'}`），而 `max-tokens` / `aborted` / 无终止块**不重试**（去掉字段只会让推理回来，更糟）。两次尝试共用同一个 3 秒期限，重试不会把它翻倍。测试里有一条专门钉 `reasoningEffort === 'off'`——修复前那条断言写的是「不许出现这个字段」，正好把正确的修复判成了失败。
+现在请求里显式带 `reasoningEffort: 'off'`（DSH 自己的 `session-title` 单行生成用的也是它）。万一当前默认模型不认这个档（llm 的能力校验跑在**派发之前**，会以终止性 `finish{kind:'error'}` + `UNSUPPORTED_REASONING_EFFORT` 结束、不发真实请求），`resolveTip` 会**去掉这个字段重试一次**：采纳标准一点没松（第二次同样必须拿到 `finish{kind:'stop'}`），而 `max-tokens` / `aborted` / 无终止块**不重试**（去掉字段只会让推理回来，更糟）。两次尝试共用同一个 3 秒期限，重试不会把它翻倍。**重试的白名单里只有 `UNSUPPORTED_REASONING_EFFORT` 这一个码**：auth 失效 / 额度用尽 / 限流 / 网络故障一律不重试——那些失败换一份请求体照样失败，第二枪只是白烧一次**真实计费**的请求（早期实现是「任何 error 都重试」，与这句话不符，整支评审收窄了它）。测试里有一条专门钉 `reasoningEffort === 'off'`——修复前那条断言写的是「不许出现这个字段」，正好把正确的修复判成了失败。
 
 ## 交互
 
@@ -416,7 +416,7 @@ node --run test        # = node test/model.test.mjs && node test/tip.test.mjs
 
 **长休息周期**：跳过遵循周期（`longEvery = 1` 时跳过专注必须进长休息）、跳过不虚报番茄数、自然走完仍计数、补算推进周期但不计数、周期位置随刷新持久化，以及**「预告」与 `skip()` 的真实结果在 5 种长休间隔、2400 步随机游走中完全一致**——这保证「跳到 XXX」按钮的文案不可能与实际行为不符。另有两条守卫钉住"本轮"计数的归零时机：**长休息走完进入下一个专注时才归零**，以及**长休息中途用 Tab 切到专注也归零**（后者绕开 `completePhase`，漏了会导致此后每次专注都紧跟一个长休息）。
 
-`test/tip.test.mjs` 同样不启动浏览器、不发网络请求：它直接 `import` 宿主半 `index.js` 的具名导出（prompt 构造、清洗、校验、生成编排、同源判定），用假 `llm` 与假 `ctx` 把失败矩阵逐条走一遍（含 `reasoningEffort: 'off'` 与那次有上限的重试、handler 兜底异常的留痕）；另有两组客户端纯函数——角度轮换 `nextAngle`、小圆点的按键归属 `miniRootKeyDown`——按 `// --- tip-angle/tip-key ---` 标记从 `client.js` 里切出来求值。**气泡组件本身在仓库里没有自动化覆盖**（浏览器包 import 不了），那部分只有仓库外的一次性冒烟与人工目视，见「验证状态」。
+`test/tip.test.mjs` 同样不启动浏览器、不发网络请求：它直接 `import` 宿主半 `index.js` 的具名导出（prompt 构造、清洗、校验、生成编排、同源判定），用假 `llm` 与假 `ctx` 把失败矩阵逐条走一遍（含 `reasoningEffort: 'off'` 与那次收窄后有上限的重试）；**HTTP 映射也在里面**——最后一组用假 `ctx` / 假 `req` / 假 `res` 装载**真实的** `apply` 与 `handleTip`，钉住 `200 + {"text"} + cache-control: no-store`、五条 204 出口（跨站 `Origin`、非法 query、`llm` 缺席、默认模型缺席、`resolveTip` → null）与 `handler-threw` 的留痕；内部 3 秒期限留了 `deps.timeoutMs` 接缝，单测用 50ms 就能证明「期限真的会砍掉慢调用」（生产路径不传接缝，默认仍是 3000ms）。另有**四组**客户端纯函数——角度轮换 `nextAngle`、小圆点的按键归属 `miniRootKeyDown`、✕ 的键盘激活判定 `tipCloseFromKeyboard`、`round` 的 0 → 1 钳制 `tipRoundParam`——按 `// --- tip-angle / tip-key / tip-focus / tip-round ---` 标记从 `client.js` 里切出来求值。**气泡组件的渲染与接线在仓库里仍没有自动化覆盖**（浏览器包 import 不了），那部分只有仓库外的一次性冒烟与人工目视，见「验证状态」。
 
 改动 `index.js` 或 `client.js` 的纯逻辑部分后请跑一遍 `node --run test`；只改注释和文档不用跑。测试靠字符串标记定位切片：如果标记变了导致切不出来、或切出来的片段混入了渲染代码，它会**直接抛错**，而不是静默测到错的东西。
 
@@ -426,16 +426,16 @@ node --run test        # = node test/model.test.mjs && node test/tip.test.mjs
 
 **一条命令就能复现的**
 
-- `node --run test`（= `node test/model.test.mjs && node test/tip.test.mjs`）：退出码 **0**，**40/40 + 86/86 = 126 项断言全过**。
+- `node --run test`（= `node test/model.test.mjs && node test/tip.test.mjs`）：退出码 **0**，**40/40 + 105/105 = 145 项断言全过**。
   - `test/model.test.mjs`（40 项）：把纯计时模型从 `client.js` 里切出来（并断言切片**不含** `React` / `document` / `createElement`），注入可控时钟与内存版 `localStorage` 后跑真实状态机。
-  - `test/tip.test.mjs`（86 项）：宿主半的纯逻辑与全失败矩阵——prompt 构造（含「累计」口径）、`sanitizeTip`、`validateTip` 的中英长度界、`resolveTip` 的每条回退路径（含 `reasoningEffort: 'off'` 与那次有上限的重试）、`isSameOrigin`、handler 兜底异常的留痕；另有两组按标记从 `client.js` 切出来求值的纯函数：`nextAngle`、`miniRootKeyDown`。全部无网络、无浏览器。
+  - `test/tip.test.mjs`（105 项）：宿主半的纯逻辑与全失败矩阵——prompt 构造（含「累计」口径与中英两条长度界的完整表述）、`sanitizeTip`、`validateTip` 的中英长度界、`resolveTip` 的每条回退路径（含 `reasoningEffort: 'off'`、收窄后的重试白名单、可注入的内部期限、abort 引起的失败按 signal 归类）、`isSameOrigin`，以及**用假 ctx/req/res 驱动真实 `apply`/`handleTip` 的路由契约组**（200 + no-store、五条 204 出口、`handler-threw` 留痕、`req` close → abort）；另有四组按标记从 `client.js` 切出来求值的纯函数：`nextAngle`、`miniRootKeyDown`、`tipCloseFromKeyboard`、`tipRoundParam`。全部无网络、无浏览器。
 - `node --check` 通过：`index.js`、`client.js`、`test/*.mjs`；`package.json`、`locale/zh.json`、`locale/en.json` 用 `JSON.parse` 可解析。
-- **静态事实**（读文件即可复核；数字是 2026-10-07 这份树的）：中英两个字典各 **33 个键**、逐项对齐且键序一致（`locale/*.json` 的 2 个 meta 键同样对齐）；**30 个 class 键**全部出现在样式表里，也没有未定义的 `CLASS.*` 引用；样式表用到的 **33 个自定义属性**全部是插件自己的 `--dsp-pc-*` 或宿主的 `--dsw-*` / `--dsh-*`（后者只有气泡定位用的 `--dsh-frame-overlay-top` 一个）；注释语言：按"以 `//` 开头，或以 `*` 开头且该行不只有 `*` / `/`（即**排除只有 `*`、`*/` 的纯标记行**）"统计，`client.js` 264 行、`index.js` 229 行注释，其中不含中文的只有 6 / 9 行（空的 `//` 分隔行、`// --- tip-angle/tip-key ---` 切片标记行、JSDoc 的纯类型签名行）。
+- **静态事实**（读文件即可复核；数字是 2026-10-07 这份树的）：中英两个字典各 **33 个键**、逐项对齐且键序一致（`locale/*.json` 的 2 个 meta 键同样对齐）；**30 个 class 键**全部出现在样式表里，也没有未定义的 `CLASS.*` 引用；样式表用到的 **33 个自定义属性**全部是插件自己的 `--dsp-pc-*` 或宿主的 `--dsw-*` / `--dsh-*`（后者只有气泡定位用的 `--dsh-frame-overlay-top` 一个）；注释语言：按"以 `//` 开头，或以 `*` 开头且该行不只有 `*` / `/`（即**排除只有 `*`、`*/` 的纯标记行**）"统计，`client.js` 303 行、`index.js` 263 行注释，其中不含中文的只有 12 / 9 行（空的 `//` 分隔行、`// --- tip-angle / tip-key / tip-focus / tip-round ---` 四种切片标记各自的起止两行、JSDoc 的纯类型签名行）。
 
 **本次功能用过、但脚本不在仓库里（新克隆复现不了）**
 
-- **浏览器包的整机冒烟**：用 `new Function` 载入真实的 `client.js`，配假 `window` / `document` / `fetch` / `Date` 与一个约 120 行的迷你 React，装载真实的 `apply` 与真实组件树。脚本是 `%TEMP%\pomodoro-smoke.mjs`（临时文件），2026-10-07 复核 **49/49 通过**。它覆盖：气泡出现与三行文案、请求 URL 五个参数齐全、200 替换默认句、204 与"迟到响应"保持默认句、✕ ↔ 小圆点往返、圆点随 tick 走、圆盘态下圆点仍在、切到专注时 abort、语言切换重发、`aiTip` 关掉 0 次请求、小圆点上的 Enter 不被根节点抢走。它用的是假 DOM 与自写迷你 React，**证明不了真实 DOM、真实 React 与真实浏览器行为**。
-- **仓库外的 HTTP harness**（`..\.scratch-asar\`，不提交）：`tip-route-harness.mjs`（假 ctx + 真 `node:http`，37 项）与 `tip-e2e.mjs`（真 cordis + 真 webserver + 真端口，装载提交版 `index.js`，14 项）。2026-10-07 复核：e2e **14/14 通过**；route harness **35/37**——两条失败是**脚本自己**的旧断言（断言请求里不许出现 `reasoningEffort`、断言 prompt 写「今天已完成 7 个」），与现在的实现正相反，不是产品失败。这恰好说明仓库外的脚本当不了回归网。
+- **浏览器包的整机冒烟**：用 `new Function` 载入真实的 `client.js`，配假 `window` / `document` / `fetch` / `Date` 与一个约 120 行的迷你 React（修复轮 6 起它也给宿主节点接 `ref` 与 `focus()`，用来观察焦点去哪了），装载真实的 `apply` 与真实组件树。脚本是 `%TEMP%\pomodoro-smoke.mjs`（临时文件），2026-10-07 修复轮 6 后复核 **54/54 通过**。它覆盖：气泡出现与三行文案、请求 URL 五个参数齐全（含 `cycleFocus=0` 时发 `round=1`）、200 替换默认句、204 与"迟到响应"保持默认句、✕ ↔ 小圆点往返、鼠标点 ✕ 不动焦点而键盘按 ✕ 把焦点交给小圆点、圆点随 tick 走、圆盘态下圆点仍在、切到专注时 abort、语言切换重发、`aiTip` 关掉 0 次请求、小圆点上的 Enter 不被根节点抢走。它用的是假 DOM 与自写迷你 React，**证明不了真实 DOM、真实 React 与真实浏览器行为**。
+- **仓库外的 HTTP harness**（`..\.scratch-asar\`，不提交）：`tip-route-harness.mjs`（假 ctx + 真 `node:http`，37 项）与 `tip-e2e.mjs`（真 cordis + 真 webserver + 真端口，装载提交版 `index.js`，14 项）。2026-10-07 复核：e2e **14/14 通过**；route harness **35/37**——两条失败是**脚本自己**的旧断言（断言请求里不许出现 `reasoningEffort`、断言 prompt 写「今天已完成 7 个」），与现在的实现正相反，不是产品失败。这恰好说明仓库外的脚本当不了回归网；那两条契约从修复轮 6 起改由**仓库内**的路由契约组（`test/tip.test.mjs` 最后一组）守着。
 - **实机端到端**（由控制器在**新起的宿主进程**上做：`dsh --profile web --no-open --port 19588`）：zh 200 `{"text":"喝几口水吧，杯子见底就去接满。"}`、en 200、同一条请求 6/6 采样 200（933–2120 ms）、跨站 `Origin` 204、`round=abc` 204、缺 `done` 204、`GET /` 401、`/nope.js` 404；慢调用被 3 秒期限砍断（**204 @3042ms / 3032ms**，日志短码 `timeout`）；另有「截断 → `finish:max-tokens`」与「provider 不存在 → `error:NO_ADAPTER`」两条 204 + 日志。**那个进程已经关掉**，而桌面端这个进程（PID 5700，13:08 启动）里是旧模块：2026-10-07 19:09 实测 `GET /pomodoro/tip?…` 仍是 **404**（对照 `/` 401、`/nope.js` 404）。所以上面这些数字在**重启宿主进程之前**无法复现——这不是功能坏了，是缓存，见「改完之后怎么生效」。
 
 **更早的自检（脚本同样未入库，不能一条命令复跑）**——下面这些数字来自当时的一次性脚本，判断规则都写在对应注释里，可以手工复核：
@@ -453,6 +453,6 @@ node --run test        # = node test/model.test.mjs && node test/tip.test.mjs
 **未验证（需要人眼 / 真机）**
 
 - **一切视觉结果**：气泡的磨砂半透明在明暗两种主题下的观感、148px 圆里三行字的排版余量（提醒句取到英文上限 60 码点时会到 4 行，和 112×104px 的内容框抢地方）、✕ 有没有露在圆外、30px 圆点里 9px 的数字是否够清楚、中上方的高度是否合意（`--dsh-frame-overlay-top` 在两种系统标题栏下不同）；以及原有的间距、token 对比度、拖动手感。本环境没有浏览器控制能力，无法代替你确认"看起来对不对"。
-- **真实交互**：不抢输入焦点、点击穿透、拖动圆盘时小圆点跟随、真浏览器里 Enter 触发小圆点的原生 click、`prefers-reduced-motion` 的实际表现——冒烟测试用的是假 DOM，这些只有真浏览器能证。
+- **真实交互**：不抢输入焦点、键盘按 ✕ 后焦点落到小圆点（假 DOM 冒烟里 `ref`/`focus()` 是自写的，真实浏览器的事件 `detail` 与焦点规则要人眼/真机验一次）、点击穿透、拖动圆盘时小圆点跟随、真浏览器里 Enter 触发小圆点的原生 click、`prefers-reduced-motion` 的实际表现——冒烟测试用的是假 DOM，这些只有真浏览器能证。
 - **真实浏览器里的一次完整往返**：客户端那一侧只被桩 fetch 覆盖过，宿主路由那一侧是被 `curl.exe` 覆盖过的，两边合起来的"点开一次休息 → 气泡拿到 AI 句"没有仓库内的记录。
 - **气泡与卡片重叠**：气泡固定在中上方，卡片被拖到那里时会被压在下面，没有做避让。

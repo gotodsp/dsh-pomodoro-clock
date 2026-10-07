@@ -67,7 +67,7 @@ ctx.webServer.register({ kind: 'exact', path: '/pomodoro/tip', handler })
    **`Origin` 缺席时放行**——同源 GET 通常不带 `Origin`，把它当跨站会误杀正常请求。跨站请求一定会带 `Origin`，所以这条仍然拦得住。
 3. **模型选择**：走 `agentDefaultModel.currentSelection()` 拿当前 provider/model，**不硬编码**。
    **`reasoningEffort` 必须显式发 `'off'`**，并设 `maxTokens: 60`。
-   **实现更正**：本节原文写的是"不传 `reasoningEffort`（让适配器用它自己的默认），理由：本机配的是 `high`，显式抬推理档是浪费"——**这是反的**。不传就是走适配器的默认，而默认档正是 `high`；思考型模型会把 60 个 token 全花在 `reasoning-delta` 上，以 `finish{kind:'max-tokens'}` 收尾、**一个 `text-delta` 都没有**，于是永远静默 204。现在显式发 `reasoningEffort: 'off'`（DSH 自己的 `session-title` 单行生成用的也是它），并在适配器以 `UNSUPPORTED_REASONING_EFFORT` 之类的终止性 `error` 拒绝该字段时去掉它重试一次。
+   **实现更正**：本节原文写的是"不传 `reasoningEffort`（让适配器用它自己的默认），理由：本机配的是 `high`，显式抬推理档是浪费"——**这是反的**。不传就是走适配器的默认，而默认档正是 `high`；思考型模型会把 60 个 token 全花在 `reasoning-delta` 上，以 `finish{kind:'max-tokens'}` 收尾、**一个 `text-delta` 都没有**，于是永远静默 204。现在显式发 `reasoningEffort: 'off'`（DSH 自己的 `session-title` 单行生成用的也是它），并在适配器以终止性 `error` + `UNSUPPORTED_REASONING_EFFORT` 拒绝该字段时去掉它重试一次。**修复轮 6 又收窄了一层**：重试白名单里只有这一个码——auth / 额度 / 限流 / 网络失败不再重试，那类失败的第二枪只是白烧一次真实计费的请求。
 4. **prompt**：system 约束输出形状（只输出一句话、12–20 字、不要引号、不要 emoji、不要说教、不要客套）；user 给状态（阶段 / 第几个番茄 / **已完成几个（累计）** / 当前时间）和这次的角度。
    **`done` 是累计数，不是"今天"**：插件里只有 `completedFocus`（只有"清除统计"才归零），没有按天的维度，写"今天已完成 N 个"等于递给模型一个假前提，它会顺着编。
 5. **清洗**：去掉引号、换行、开头的"好的，""没问题，"之类。

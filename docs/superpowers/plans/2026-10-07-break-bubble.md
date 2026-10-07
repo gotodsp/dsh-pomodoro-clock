@@ -239,6 +239,12 @@ assert.equal(await resolveTip({ llm: okLlm(textChunks('去接杯水吧')), provi
 Run: `node test/tip.test.mjs`
 Expected: FAIL —— `resolveTip` 未定义
 
+> **实现更正（修复轮 6）**：上面代码里那句「内部超时由 Task 4 Step 5 的实机验证覆盖」已过时。
+> `resolveTip` 现在有 `deps.timeoutMs ?? 3000` 接缝（非法取值也退回 3000；生产路径不传，默认仍是
+> 3000ms），`test/tip.test.mjs` 用 50ms 就能验证「期限真的会砍掉慢调用」，连「适配器用 reject
+> 兑现 `signal`」那条按 signal 归类的路径一起（`timeout` / `client-abort`，不再是 `iteration-threw`）。
+> 真等 3 秒那条建议本身仍然成立，所以没有改上面的样例代码。
+
 - [ ] **Step 3: 实现 `resolveTip`**
 
 构造 `AbortSignal.timeout(3000)`；调 `deps.llm.stream({ provider, model, system, messages, maxTokens: 60, reasoningEffort: 'off', signal })`——**必须显式传 `reasoningEffort: 'off'`**（不传就是 `high`，会把 60 token 预算全烧在推理上、零文本输出），**不传 `purpose`**；累加 `text-delta`；`finish.reason.kind` 不是 `'stop'` 时返回 `null`；对结果跑 `sanitizeTip` + `validateTip`，不过则 `null`；整个函数体包在 try/catch 里，任何异常都返回 `null`。
@@ -296,6 +302,11 @@ Expected: FAIL —— `isSameOrigin` 未定义
 handler 顺序：同源检查不过 → 204 → 解析 query → `resolveTip` → `null` 则 204，否则 `200 {"text": ...}`。**响应头带 `cache-control: no-store`。** 客户端断开时 abort 进行中的生成（`req.on('close')` → `controller.abort()`，signal 传进 `deps.signal`）。
 
 **query 的值全部是字符串，必须在调用 `resolveTip` 前转成数字**：`round` 与 `done` 用 `Number(...)` 转换并检查 `Number.isFinite`，转换失败就当作 204。**不转的话 `buildTipPrompt` 的防御性兜底会把它们静默变成 `1` 和 `0`**——模型会对一个配置完全正确的用户说"本轮第 1 个番茄，已完成 0 个（累计）"，而没有任何地方看得出错了。
+
+> **实现更正（修复轮 6）**：`Number.isFinite` 不够——`round=1.5`、`done=-3` 也是有限数，
+> 会把「本轮第 1.5 个番茄」这种前提当真的发给模型。现在的 `parseCount` 要求
+> `Number.isSafeInteger(value) && value >= 0`。`round=0` 依旧是合法整数（宿主有意不替调用方
+> 圆场），改为**客户端**把 `cycleFocus === 0` 钳成 `1`（`client.js` 的 `tipRoundParam`）。
 
 `now` 由 handler 自己算：取本地时间的 `HH:MM`（`new Date()` → 补零），**不要交给 `buildTipPrompt` 去取**，那会破坏它的纯函数性质。
 
