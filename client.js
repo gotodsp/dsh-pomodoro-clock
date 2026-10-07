@@ -353,9 +353,11 @@ window.__ModuleLoader__.load({
       // 两者写在一起会互相覆盖（动画一跑，居中就没了）。
       `.${CLASS.tip}{position:absolute;left:50%;top:50%;translate:-50% -50%;`,
       `box-sizing:border-box;width:180px;height:180px;padding:9px;border-radius:50%;display:grid;place-items:center;`,
-      // 这圈 1px 描边是上一版"脆"的来源，换 SVG 时被我顺手删掉了 —— 观感立刻变糊。
-      // 环由 SVG 画，描边负责最外那一圈干净的边界，两者不冲突。
-      `border:1px solid var(--dsw-alias-border-l1);`,
+      // **不要给气泡加 1px 描边**（曾经加过 `border:1px solid --dsw-alias-border-l1`，两个坏处）：
+      // 1) 暗色主题下它是浅色的 —— 那是个会发白的元素，"四个位置发白"的实测反馈就是它露出来的部分；
+      // 2) 有边框时**内边距盒只有 178px**，而 SVG 外环是 180px，两者错位 1px，环盖不住边框，
+      //    边框就在环没对齐的地方露出来。
+      // 环（SVG 描边）自己就是边界，不需要再描一层。
       `box-shadow:var(--dsw-elevation-soft,0 8px 28px rgb(0 0 0 / 16%));`,
       `animation:dsp-pc-tip-in 240ms ease-out}`,
       // 外环改用 **SVG** 画，不用 conic-gradient。

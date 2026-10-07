@@ -1,6 +1,6 @@
 {
   "name": "@local/pomodoro-clock",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "private": true,
   "description": "Floating Pomodoro focus clock: 25/5/15 phases, draggable dial, cycle counter, and settings.",
   "type": "module",
