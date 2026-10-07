@@ -368,6 +368,13 @@ window.__ModuleLoader__.load({
       // 顺带的好处：环宽就是 `stroke-width`，不必再靠 padding 反推。
       // r=85.5、stroke-width=9 → 环占 r 81~90；内盘 r=81（162px），两者正好接上。
       `.${CLASS.tipRing}{position:absolute;inset:0;width:180px;height:180px;display:block;pointer-events:none}`,
+      // 描边宽度与填充写进 CSS，**不靠属性**。
+      // 实测现象："四个方向中间没问题、四个角没有颜色" —— 这是**线太细/太淡**的典型特征：
+      // 笔画在正上正下正左正右是横平竖直的，渲染得清楚；到四个斜角曲线成 45°，抗锯齿把线摊到
+      // 两个像素上就淡到看不见。属性形式的 stroke-width 没生效时就是这个样子。
+      // 颜色仍由每个 circle 的 style 提供（见 BreakTip），这里只管几何。
+      `.${CLASS.tipRing} circle{fill:none;stroke-width:9}`,
+      `.${CLASS.tipRing} circle:last-child{stroke-linecap:butt}`,
       // 内盘：与圆盘的 `.dsp-pc-ring-inner` 同一套（不透明两段实色），只是里面多了那句文案。
       // 内盘 164px（r=82）而不是 162px（r=81）：**故意往环底下压 1px**。
       // SVG 环的内缘与内盘的外缘如果正好相接，两条抗锯齿边会叠出一道极淡的亮缝，
