@@ -1,14 +1,25 @@
 /**
- * Host half of the Pomodoro clock bundle.
+ * 番茄钟插件的宿主半。
  *
- * The clock itself runs entirely in the browser entry (`./client`): the
- * countdown, its settings, its persistence, and the floating widget it mounts
- * into the frame-wide `shell.overlay` layer. This half exists so the Loader row
- * is addressable — the plugin is listed, enable/disable-able, and disposable
- * through the ordinary profile composition — without adding Host services the
- * feature does not need.
+ * 时钟本身完全跑在浏览器入口（`./client`）里：倒计时、它的设置、它的持久化，以及它挂进整帧
+ * `shell.overlay` 层的悬浮控件。宿主半只负责休息气泡需要的那一块：`apply` 注册无状态的只读
+ * 路由 `/pomodoro/tip`，客户端在休息开始时拉一次。所有失败路径都回 204，气泡保留默认句。
  */
-export function apply() {}
+export function apply(ctx) {
+  // 用 ctx.inject 等 webServer 到位，而不是在这里 ctx.get 一次：加载器把同一层的 entry **并发**激活
+  // （cordis-plugin-loader 的 EntryGroup.update → Promise.all），而 ctx.get 默认 strict——只认
+  // 「fiber 已激活」的服务。开机竞态里 get 拿到 undefined 的话，这条路由会**永久**不注册，
+  // 从外面只能看到「AI 句永远不出现」，没有任何线索。inject 的语义正是「服务缺席就什么都不做」，
+  // 与计划里的「webServer 缺席则整体不注册」一致，但不受激活顺序影响。
+  ctx.inject(['webServer'], (child) => {
+    // 注册挂在 effect 上：插件卸载 / 热重载时路由跟着一起撤掉。
+    child.effect(() => child.webServer.register({
+      kind: 'exact',
+      path: '/pomodoro/tip',
+      handler: (req, res) => handleTip(child, req, res),
+    }), 'pomodoro: tip route')
+  })
+}
 
 // ------------------------------------------------------------ 休息提醒：构句
 //
@@ -292,5 +303,137 @@ export async function resolveTip(deps, input) {
     // 任何异常（含 sanitizeTip 对非字符串的显式抛错、buildTipPrompt 收到坏 input）
     // 都不外泄：调用方只认 null。
     return null
+  }
+}
+
+// ------------------------------------------------------------ 宿主路由（HTTP 适配层）
+//
+// 这是纯逻辑与 HTTP 之间唯一的接缝：解析 query → resolveTip → 状态码映射。失败矩阵全部
+// 收敛到 204 空体（客户端保持默认句，气泡永不变空、永不报错）。
+//
+// 访问控制（已对着 dsh-host-webserver / dsh-host-frontend-static 的源码确认）：这条路由**不经过**
+// DSH 的浏览器鉴权。webServer 的 handle() 先查具名路由表，命中就直接调 handler；只有未命中的请求
+// 才落到 fallback。`GET /` 那个 401 正是 fallback（frontend-static）在渲染 index 之前调
+// connection.authorizeIndex 发出的，非 index 的静态资源本来就是公开的（实测 `/nope.js` 是 404 不是 401）。
+// 所以 isSameOrigin 是这条路由**唯一的**访问控制，不是第二层，不能因为「反正外面有 401」而放松。
+// （connection 另有 requestRejection：Host 白名单 + 浏览器鉴权，可复用到别的 Web 路由；本任务按计划
+// 不引入该依赖——它的失败出口是 401/403，而本路由的契约是失败一律 204。）
+
+/**
+ * 同源检查。
+ *
+ * Origin 缺席（或空串）放行：同源的 GET 一般不带 Origin——浏览器只在跨站请求与非 GET/HEAD
+ * 上带它，把它当跨站会把正常请求全部误杀。跨站的 fetch 一定会带 Origin，所以这条仍拦得住跨站。
+ *
+ * 解析不出 host 的 Origin（含沙箱 iframe 与 file:// 页面发出的字符串 "null"）一律按跨站处理：
+ * 这条路由没有别的访问控制，宁可拒。非浏览器客户端（curl、本机进程）不带 Origin，会放行——
+ * 它们本来也不需要 cookie（具名路由先于 fallback 分发，见本节开头）。
+ * @param {string | undefined} origin 请求头 Origin 原文
+ * @param {string | undefined} host 请求头 Host 原文（含端口）
+ * @returns {boolean} true 表示继续处理
+ */
+export function isSameOrigin(origin, host) {
+  if (origin === undefined || origin === '') return true
+  let originHost
+  try {
+    originHost = new URL(origin).host
+  } catch {
+    return false
+  }
+  // host 由 URL 解析器归一（大小写、默认端口不写出来），与浏览器发出的 Host 写法一致。
+  return originHost !== '' && originHost === host
+}
+
+/** 204 空体：所有失败路径的唯一出口。同样 no-store——状态码本身也不该被缓存。 */
+function noContent(res) {
+  res.writeHead(204, { 'cache-control': 'no-store' })
+  res.end()
+}
+
+/** 本地时间的 HH:MM（补零）。时间由 handler 取，buildTipPrompt 保持纯函数、可测。 */
+function localHhMm() {
+  const at = new Date()
+  return `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`
+}
+
+/**
+ * query 里的计数（round / done）。
+ * Number(null) 与 Number('') 都是 0：缺席或空串如果直接放过去，prompt 会拿到「本轮第 0 个
+ * 番茄」，比 buildTipPrompt 的兜底（1 / 0）更糟，而且同样从外面看不出错。所以非数字串、
+ * 空串、缺席一律返回 undefined，由调用方映射成 204。
+ * @param {string | null} raw searchParams.get 的原文
+ * @returns {number | undefined} 能安全使用的数字，或 undefined
+ */
+function parseCount(raw) {
+  if (raw === null || raw.trim() === '') return undefined
+  const value = Number(raw)
+  return Number.isFinite(value) ? value : undefined
+}
+
+/**
+ * 路由 handler。webServer 把 node:http 的 req/res 原样交给具名路由的 handler（WebServer.init 里
+ * `route.handler(req, res)` 拿到的就是 createServer 回调的那一对），所以这里按 Node 语义写；
+ * inspect 把第二参数解析成 DSH 自己的 ServerResponse 是类型名撞车。
+ * @param {object} ctx 插件上下文；`llm` 每次请求现取（注册时取一次会被开机竞态永久钉死，见 apply）
+ * @param {import('node:http').IncomingMessage} req 请求
+ * @param {import('node:http').ServerResponse} res 响应
+ * @returns {Promise<void>} 响应在函数返回前发完
+ */
+async function handleTip(ctx, req, res) {
+  try {
+    // 1. 同源：跨站一律 204，连 query 都不解析，更不碰模型。
+    if (!isSameOrigin(req.headers.origin, req.headers.host)) {
+      noContent(res)
+      return
+    }
+
+    // 2. query：round / done 到这里是字符串，必须在进 resolveTip 前转成数字并验明有限；
+    //    phase / angle / lang 原样传下去，取值合法性由 buildTipPrompt 兜底（未知角度回退第一档）。
+    const params = new URL(req.url ?? '/', 'http://dsh.invalid').searchParams
+    const round = parseCount(params.get('round'))
+    const done = parseCount(params.get('done'))
+    if (round === undefined || done === undefined) {
+      noContent(res)
+      return
+    }
+
+    // 3. 服务与模型选择：任一缺席都当 llm 缺席处理（第一道降级，早于任何超时与 I/O）。
+    //    llm 每次请求现取：注册时取一次会让开机竞态里的 undefined 变成永久降级（见 apply）。
+    const llm = ctx.get('llm')
+    const selection = ctx.get('agentDefaultModel')?.currentSelection()
+    if (llm === undefined || llm === null || selection === undefined || selection === null) {
+      noContent(res)
+      return
+    }
+
+    // 4. 客户端断开（切走 / 关页面）→ abort 进行中的生成，别让它在后台跑完并计费。
+    //    Node 24 实测：正常请求的 req 'close' 要等响应发完才触发（那时 abort 一个已返回的调用无害），
+    //    客户端中途断开则立刻触发；两种情况下对已 destroy 的 res 写 204 都不会抛错。
+    const controller = new AbortController()
+    req.on('close', () => controller.abort())
+
+    const text = await resolveTip(
+      { llm, provider: selection.provider, model: selection.model, signal: controller.signal },
+      {
+        phase: params.get('phase'),
+        round,
+        done,
+        now: localHhMm(),
+        angle: params.get('angle'),
+        lang: params.get('lang'),
+      },
+    )
+
+    // 5. null 是 resolveTip 唯一的失败出口（服务缺席 / 超时 / 取消 / finish 非 stop / 校验不过）。
+    if (text === null) {
+      noContent(res)
+      return
+    }
+
+    res.writeHead(200, { 'cache-control': 'no-store', 'content-type': 'application/json; charset=utf-8' })
+    res.end(JSON.stringify({ text }))
+  } catch {
+    // 任何未预料的异常（例如畸形 URL）都不许泄成 500：还没发响应就按失败路径回 204。
+    if (!res.headersSent) noContent(res)
   }
 }

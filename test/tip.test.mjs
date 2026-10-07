@@ -2,13 +2,13 @@
 //
 //   node test/tip.test.mjs
 //
-// 这里测纯函数（prompt 构造、输出清洗与长度校验），以及注入了假 llm 的生成编排：
-// 两者都无网络、无副作用。HTTP 路由是薄适配层，不进这里（它靠 Task 4 的实机验证）。
+// 这里测纯函数（prompt 构造、输出清洗与长度校验、同源判定），以及注入了假 llm 的生成编排：
+// 以上都无网络、无副作用。HTTP 路由本体是薄适配层，不进这里（它靠 Task 4 的实机验证）。
 // 做法与 test/model.test.mjs 一致：一个 check() 帮手 + 末尾按失败数决定退出码，
 // 方便后续任务顺序追加。
 import assert from 'node:assert/strict'
 
-import { buildTipPrompt, resolveTip, sanitizeTip, TIP_ANGLES, validateTip } from '../index.js'
+import { buildTipPrompt, isSameOrigin, resolveTip, sanitizeTip, TIP_ANGLES, validateTip } from '../index.js'
 
 let checks = 0
 let failures = 0
@@ -506,6 +506,41 @@ group('生成编排 resolveTip：注入假 llm，覆盖全部失败路径')
   assert.equal('purpose' in opts, false)
   check(true, '请求体：provider/model/system/messages/maxTokens=60/signal 齐全，无 reasoningEffort、无 purpose',
     'maxTokens 60，content 为 ContentBlock[]')
+}
+
+// ------------------------------------------------------------ 同源检查（Task 4）
+
+group('同源检查 isSameOrigin')
+{
+  // Origin 缺席 → 放行（同源 GET 通常不带 Origin；把它当跨站会把正常请求全部误杀）
+  assert.equal(isSameOrigin(undefined, 'localhost:52341'), true)
+
+  // 同源 → 放行
+  assert.equal(isSameOrigin('http://localhost:52341', 'localhost:52341'), true)
+
+  // 跨站 → 拒绝
+  assert.equal(isSameOrigin('http://evil.example', 'localhost:52341'), false)
+  check(true, 'Origin 缺席放行、同源放行、跨站拒绝（brief 点名的三条）', 'undefined / 同源 / evil.example')
+
+  // 空 Origin 等同于缺席（brief：undefined/空 → true）；
+  // host 比较交给 URL 解析器归一：大小写不敏感、默认端口不写出来，与浏览器发出的 Host 写法一致
+  assert.equal(isSameOrigin('', 'localhost:52341'), true)
+  assert.equal(isSameOrigin('http://LOCALHOST:52341', 'localhost:52341'), true)
+  assert.equal(isSameOrigin('https://localhost', 'localhost'), true)
+  check(true, '空 Origin 放行；Host 比较走 URL 归一（大小写、默认端口）', '"" / LOCALHOST / https://localhost')
+
+  // 端口不同、回环别名不同（127.0.0.1 ≠ localhost）、请求 Host 缺席：都不是同源
+  assert.equal(isSameOrigin('http://localhost:52342', 'localhost:52341'), false)
+  assert.equal(isSameOrigin('http://127.0.0.1:52341', 'localhost:52341'), false)
+  assert.equal(isSameOrigin('http://localhost:52341', undefined), false)
+  check(true, '端口不同 / 回环别名不同 / 请求 Host 缺席 → 拒绝', '52342 / 127.0.0.1 / undefined')
+
+  // 解析不了的 Origin 按跨站处理，且不许抛：沙箱 iframe 与 file:// 页面发的正是字符串 "null"。
+  // 这条路由没有别的访问控制（401 只挡 fallback 的 index 响应），所以这里宁可拒。
+  assert.equal(isSameOrigin('null', 'localhost:52341'), false)
+  assert.equal(isSameOrigin('://', 'localhost:52341'), false)
+  assert.equal(isSameOrigin('localhost:52341', 'localhost:52341'), false)
+  check(true, '无法解析的 Origin（含 "null"、缺 scheme）拒绝且不抛异常', 'null / :// / localhost:52341')
 }
 
 // ---------------------------------------------------------------- 汇总
